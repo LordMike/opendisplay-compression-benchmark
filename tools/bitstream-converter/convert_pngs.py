@@ -8,9 +8,12 @@ row-major, MSB-first, palette index values packed directly into the stream.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
@@ -39,6 +42,15 @@ PALETTES: dict[str, list[tuple[int, int, int]]] = {
 
 BWGBRY_VALUE_MAP = {0: 0, 1: 1, 2: 2, 3: 3, 4: 5, 5: 6}
 SCHEME_PATTERN = re.compile(r"(^|[-_.])(bwgbry|gray16|gray4|bwry|bwr|bwy|mono)([-_.]|$)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class ConversionResult:
+    converted: int
+    skipped: int
+    failed: int
+    lines: list[str]
+    error: str | None = None
 
 
 def composite_over_white(path: Path) -> Image.Image:
@@ -174,49 +186,97 @@ def pack_1bpp_streams(indices: list[int], width: int, height: int, bpp: int, sch
     return bytes(out)
 
 
-def schemes_for_image(path: Path, image: Image.Image, requested_scheme: str | None) -> list[tuple[str, int, list[int]]]:
-    colors = colors_first_seen(image)
+def scheme_specs_for_image(
+    path: Path,
+    exact_colors: list[tuple[int, int, int]],
+    requested_scheme: str | None,
+) -> list[tuple[str, int, str]]:
     if requested_scheme:
         requested = list(SCHEME_BITS) if requested_scheme == "all" else [requested_scheme]
-        return [(scheme, SCHEME_BITS[scheme], dither_burkes(image, PALETTES[scheme])) for scheme in requested]
+        return [(scheme, SCHEME_BITS[scheme], "dither") for scheme in requested]
 
     detected = detect_scheme_from_name(path)
     if detected:
-        return [(detected, SCHEME_BITS[detected], dither_burkes(image, PALETTES[detected]))]
+        return [(detected, SCHEME_BITS[detected], "dither")]
 
-    if len(colors) <= 16:
-        scheme, bpp = infer_exact_scheme(len(colors))
-        return [(scheme, bpp, indexed_from_exact_colors(image, colors))]
+    if len(exact_colors) <= 16:
+        scheme, bpp = infer_exact_scheme(len(exact_colors))
+        return [(scheme, bpp, "exact")]
 
     defaults = ["mono", "gray4", "gray16"]
-    return [(scheme, SCHEME_BITS[scheme], dither_burkes(image, PALETTES[scheme])) for scheme in defaults]
+    return [(scheme, SCHEME_BITS[scheme], "dither") for scheme in defaults]
 
 
 def output_prefix(path: Path, scheme: str, width: int, height: int) -> Path:
     return path.with_name(f"{path.stem}.{scheme}.{width}x{height}")
 
 
-def convert_png(path: Path, requested_scheme: str | None) -> int:
+def outputs_are_current(source_mtime: float, paths: Iterable[Path]) -> bool:
+    for path in paths:
+        try:
+            if path.stat().st_mtime <= source_mtime:
+                return False
+        except FileNotFoundError:
+            return False
+    return True
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_bytes(data)
+    tmp_path.replace(path)
+
+
+def convert_png(path: Path, requested_scheme: str | None) -> ConversionResult:
     image = composite_over_white(path)
     width, height = image.size
     exact_colors = colors_first_seen(image)
-    variants = schemes_for_image(path, image, requested_scheme)
+    variants = scheme_specs_for_image(path, exact_colors, requested_scheme)
 
-    for scheme, bpp, indices in variants:
+    converted = 0
+    skipped = 0
+    lines = []
+    source_mtime = path.stat().st_mtime
+
+    for scheme, bpp, index_mode in variants:
         prefix = output_prefix(path, scheme, width, height)
-        od = pack_od(indices, width, height, bpp, scheme)
-        planes = pack_1bpp_streams(indices, width, height, bpp, scheme)
         od_path = prefix.parent / f"{prefix.name}.bs-od"
         g5_path = prefix.parent / f"{prefix.name}.bs-1bppstreams"
-        od_path.write_bytes(od)
-        g5_path.write_bytes(planes)
-        print(
+
+        source_colors = len(exact_colors) if len(exact_colors) < 17 else ">16"
+        if outputs_are_current(source_mtime, (od_path, g5_path)):
+            skipped += 1
+            lines.append(
+                f"{path} scheme={scheme} resolution={width}x{height} "
+                f"source_colors={source_colors} bpp={bpp} skipped=current"
+            )
+            continue
+
+        if index_mode == "exact":
+            indices = indexed_from_exact_colors(image, exact_colors)
+        else:
+            indices = dither_burkes(image, PALETTES[scheme])
+
+        od = pack_od(indices, width, height, bpp, scheme)
+        planes = pack_1bpp_streams(indices, width, height, bpp, scheme)
+        write_atomic(od_path, od)
+        write_atomic(g5_path, planes)
+        converted += 1
+        lines.append(
             f"{path} scheme={scheme} resolution={width}x{height} "
-            f"source_colors={len(exact_colors) if len(exact_colors) < 17 else '>16'} "
-            f"bpp={bpp} od_bytes={len(od)} g5_bytes={len(planes)}"
+            f"source_colors={source_colors} bpp={bpp} od_bytes={len(od)} "
+            f"g5_input_bytes={len(planes)}"
         )
 
-    return len(variants)
+    return ConversionResult(converted=converted, skipped=skipped, failed=0, lines=lines)
+
+
+def convert_png_task(task: tuple[Path, str | None]) -> ConversionResult:
+    path, requested_scheme = task
+    try:
+        return convert_png(path, requested_scheme)
+    except Exception as exc:  # noqa: BLE001 - CLI should continue through bad corpus entries.
+        return ConversionResult(converted=0, skipped=0, failed=1, lines=[], error=f"{path}: failed: {exc}")
 
 
 def iter_pngs(paths: Iterable[Path]) -> Iterable[Path]:
@@ -237,6 +297,13 @@ def parse_args() -> argparse.Namespace:
         choices=["mono", "gray4", "gray16", "bwr", "bwy", "bwry", "bwgbry", "all"],
         help="Force one scheme, or all schemes, instead of inferring from the PNG/name.",
     )
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help=f"Number of PNGs to convert in parallel. Defaults to 1. This machine reports {os.cpu_count() or 1} CPUs.",
+    )
     return parser.parse_args()
 
 
@@ -246,17 +313,30 @@ def main() -> int:
     if not pngs:
         print("no PNG files found", file=sys.stderr)
         return 2
+    if args.jobs < 1:
+        print("--jobs must be at least 1", file=sys.stderr)
+        return 2
 
     converted = 0
+    skipped = 0
     failed = 0
-    for png in pngs:
-        try:
-            converted += convert_png(png, args.scheme)
-        except Exception as exc:  # noqa: BLE001 - CLI should continue through bad corpus entries.
-            failed += 1
-            print(f"{png}: failed: {exc}", file=sys.stderr)
+    tasks = [(png, args.scheme) for png in pngs]
+    if args.jobs == 1:
+        results = map(convert_png_task, tasks)
+    else:
+        with ProcessPoolExecutor(max_workers=args.jobs) as executor:
+            results = executor.map(convert_png_task, tasks)
 
-    print(f"converted_variants={converted} failed_images={failed}")
+    for result in results:
+        converted += result.converted
+        skipped += result.skipped
+        failed += result.failed
+        for line in result.lines:
+            print(line)
+        if result.error:
+            print(result.error, file=sys.stderr)
+
+    print(f"converted_variants={converted} skipped_variants={skipped} failed_images={failed}")
     return 1 if failed else 0
 
 

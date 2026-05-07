@@ -26,10 +26,19 @@ masters, not benchmark-ready target-resolution images.
 
 ```bash
 python3 tools/bitstream-converter/convert_pngs.py image_sources
+python3 tools/bitstream-converter/convert_pngs.py --jobs 8 image_sources
 python3 tools/bitstream-converter/convert_pngs.py image_sources/photos/800x480/landscape-cloud-texture.png
 python3 tools/bitstream-converter/convert_pngs.py image_sources --scheme gray16
 python3 tools/bitstream-converter/convert_pngs.py image_sources --scheme all
 ```
+
+By default the converter runs single-threaded. Use `--jobs N` to process
+multiple PNG files in parallel.
+
+For each variant, the converter skips work when both output bitstreams already
+exist and are newer than the source PNG. When writing, it writes sibling
+`.tmp` files first and then moves them into place so interrupted runs do not
+leave half-written `.bs-*` outputs.
 
 ## Scheme Selection
 
