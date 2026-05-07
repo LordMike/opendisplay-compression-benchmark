@@ -1,0 +1,6 @@
+/_deps/
+/build/
+/fixtures/*.dat
+/compressor_benchmark
+/fixture_generator
+

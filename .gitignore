@@ -1,0 +1,13 @@
+codec_benchmark/_deps/
+codec_benchmark/build/
+codec_benchmark/fixtures/*.dat
+
+# .NET generator build output
+tools/**/bin/
+tools/**/obj/
+
+# Local editor/build noise
+.vs/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
