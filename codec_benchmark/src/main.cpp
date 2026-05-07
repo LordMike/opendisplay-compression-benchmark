@@ -19,8 +19,6 @@ extern "C" {
 
 namespace fs = std::filesystem;
 
-constexpr int kTimingRuns = 7;
-
 struct InputFile {
     fs::path path;
     std::string prefix;
@@ -42,9 +40,44 @@ struct CompressResult {
     std::string error;
 };
 
+struct Options {
+    std::string algorithm;
+    fs::path folder;
+    int runs = 1;
+    fs::path jsonl_path;
+    bool jsonl_enabled = false;
+};
+
 static bool ends_with(const std::string& value, const std::string& suffix) {
     return value.size() >= suffix.size()
         && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+static std::string json_escape(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (unsigned char c : value) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    constexpr char hex[] = "0123456789abcdef";
+                    out += "\\u00";
+                    out += hex[(c >> 4) & 0x0f];
+                    out += hex[c & 0x0f];
+                } else {
+                    out += static_cast<char>(c);
+                }
+                break;
+        }
+    }
+    return out;
 }
 
 static std::vector<uint8_t> read_file(const fs::path& path) {
@@ -329,29 +362,102 @@ static fs::path output_path_for(const InputFile& input, const std::string& algor
 }
 
 static void print_usage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " (g5|zlib|heatshrink) <source_folder>\n";
+    std::cerr << "usage: " << argv0 << " [--runs N] [--jsonl path] (g5|zlib|heatshrink) <source_folder>\n";
+}
+
+static bool parse_options(int argc, char** argv, Options& options) {
+    std::vector<std::string> positional;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--runs") {
+            if (++i >= argc) return false;
+            try {
+                options.runs = std::stoi(argv[i]);
+            } catch (...) {
+                return false;
+            }
+            if (options.runs <= 0) return false;
+        } else if (arg == "--jsonl") {
+            if (++i >= argc) return false;
+            options.jsonl_path = argv[i];
+            options.jsonl_enabled = true;
+        } else if (arg == "--help" || arg == "-h") {
+            return false;
+        } else {
+            positional.push_back(arg);
+        }
+    }
+
+    if (positional.size() != 2) return false;
+    options.algorithm = positional[0];
+    options.folder = positional[1];
+    return options.algorithm == "zlib" || options.algorithm == "heatshrink" || options.algorithm == "g5";
+}
+
+static void write_jsonl(
+    std::ofstream* jsonl,
+    const std::string& status,
+    const std::string& algorithm,
+    const std::string& variant,
+    const InputFile& input,
+    const fs::path& output_path,
+    size_t input_bytes,
+    size_t compressed_bytes,
+    double ratio,
+    double avg_ms,
+    int runs,
+    const std::string& error) {
+
+    if (jsonl == nullptr) return;
+
+    *jsonl << "{"
+           << "\"status\":\"" << json_escape(status) << "\","
+           << "\"algorithm\":\"" << json_escape(algorithm) << "\","
+           << "\"variant\":\"" << json_escape(variant) << "\","
+           << "\"input_file\":\"" << json_escape(input.path.string()) << "\",";
+    if (!output_path.empty()) {
+        *jsonl << "\"output_file\":\"" << json_escape(output_path.string()) << "\",";
+    }
+    *jsonl << "\"width\":" << input.width << ","
+           << "\"height\":" << input.height << ","
+           << "\"input_bytes\":" << input_bytes << ",";
+    if (status == "ok") {
+        *jsonl << "\"compressed_bytes\":" << compressed_bytes << ","
+               << "\"ratio\":" << std::fixed << std::setprecision(8) << ratio << ",";
+    }
+    *jsonl << "\"avg_ms\":" << std::fixed << std::setprecision(6) << avg_ms << ","
+           << "\"runs\":" << runs;
+    if (!error.empty()) {
+        *jsonl << ",\"error\":\"" << json_escape(error) << "\"";
+    }
+    *jsonl << "}\n";
 }
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
+    Options options;
+    if (!parse_options(argc, argv, options)) {
         print_usage(argv[0]);
+        return 2;
+    }
+    if (!fs::is_directory(options.folder)) {
+        std::cerr << "source folder does not exist: " << options.folder << "\n";
         return 2;
     }
 
-    const std::string algorithm = argv[1];
-    const fs::path folder = argv[2];
-    if (algorithm != "zlib" && algorithm != "heatshrink" && algorithm != "g5") {
-        print_usage(argv[0]);
-        return 2;
-    }
-    if (!fs::is_directory(folder)) {
-        std::cerr << "source folder does not exist: " << folder << "\n";
-        return 2;
+    std::ofstream jsonl_stream;
+    std::ofstream* jsonl = nullptr;
+    if (options.jsonl_enabled) {
+        jsonl_stream.open(options.jsonl_path, std::ios::app);
+        if (!jsonl_stream) {
+            std::cerr << "failed to open jsonl output: " << options.jsonl_path << "\n";
+            return 2;
+        }
+        jsonl = &jsonl_stream;
     }
 
     std::vector<Variant> variants;
     std::string suffix;
-    if (algorithm == "zlib") {
+    if (options.algorithm == "zlib") {
         suffix = ".bs-od";
         variants = {
             {"current", 6, 15, 0, 0},
@@ -359,7 +465,7 @@ int main(int argc, char** argv) {
             {"l9-ws12", 9, 12, 0, 0},
             {"l9-ws15", 9, 15, 0, 0},
         };
-    } else if (algorithm == "heatshrink") {
+    } else if (options.algorithm == "heatshrink") {
         suffix = ".bs-od";
         variants = {
             {"w9-l4", 0, 0, 9, 4},
@@ -375,15 +481,14 @@ int main(int argc, char** argv) {
         };
     }
 
-    const std::vector<InputFile> inputs = find_inputs(folder, suffix);
+    const std::vector<InputFile> inputs = find_inputs(options.folder, suffix);
     if (inputs.empty()) {
-        std::cerr << "no inputs matching *" << suffix << " found in " << folder << "\n";
+        std::cerr << "no inputs matching *" << suffix << " found in " << options.folder << "\n";
         return 1;
     }
 
     double ratio_sum = 0.0;
     size_t success_count = 0;
-    bool had_error = false;
 
     std::cout << "algorithm variant file resolution input_bytes compressed_bytes ratio avg_ms\n";
 
@@ -393,23 +498,20 @@ int main(int argc, char** argv) {
             source = read_file(input.path);
         } catch (const std::exception& ex) {
             std::cerr << input.path << ": " << ex.what() << "\n";
-            had_error = true;
             continue;
         }
 
         int plane_count = 0;
-        if (algorithm == "g5") {
+        if (options.algorithm == "g5") {
             const size_t pitch = (static_cast<size_t>(input.width) + 7u) / 8u;
             const size_t plane_size = pitch * static_cast<size_t>(input.height);
             if (plane_size == 0 || source.size() % plane_size != 0) {
                 std::cerr << input.path << ": G5 input size is not divisible by plane size\n";
-                had_error = true;
                 continue;
             }
             plane_count = static_cast<int>(source.size() / plane_size);
             if (plane_count != 1 && plane_count != 2 && plane_count != 4) {
                 std::cerr << input.path << ": unsupported G5 plane count " << plane_count << "\n";
-                had_error = true;
                 continue;
             }
         }
@@ -420,14 +522,15 @@ int main(int argc, char** argv) {
             std::chrono::duration<double, std::milli> elapsed{0};
             bool ok = true;
             std::string error;
+            int completed_runs = 0;
 
-            for (int run = 0; run < kTimingRuns; ++run) {
+            for (int run = 0; run < options.runs; ++run) {
                 const auto start = std::chrono::steady_clock::now();
-                if (algorithm == "zlib") {
+                if (options.algorithm == "zlib") {
                     compressed = zlib_compress(source, variant.level, variant.window_bits);
                     ok = compressed.ok;
                     error = compressed.error;
-                } else if (algorithm == "heatshrink") {
+                } else if (options.algorithm == "heatshrink") {
                     compressed = heatshrink_compress(source, variant.heat_window, variant.heat_lookahead);
                     ok = compressed.ok;
                     error = compressed.error;
@@ -438,24 +541,29 @@ int main(int argc, char** argv) {
                 }
                 const auto end = std::chrono::steady_clock::now();
                 elapsed += end - start;
+                ++completed_runs;
                 if (!ok) break;
             }
 
+            const double avg_ms = completed_runs > 0 ? elapsed.count() / static_cast<double>(completed_runs) : 0.0;
+            const fs::path output_path = output_path_for(input, options.algorithm, variant.name);
+
             if (!ok) {
-                std::cerr << input.path.filename().string() << " " << algorithm << "." << variant.name
+                std::cerr << input.path.filename().string() << " " << options.algorithm << "." << variant.name
                           << ": compression failed: " << error << "\n";
-                had_error = true;
+                write_jsonl(jsonl, "failed", options.algorithm, variant.name, input, output_path,
+                    source.size(), 0, 0.0, avg_ms, options.runs, error);
                 continue;
             }
 
-            const std::vector<uint8_t>& output = (algorithm == "g5") ? g5_compressed.data : compressed.data;
+            const std::vector<uint8_t>& output = (options.algorithm == "g5") ? g5_compressed.data : compressed.data;
 
             bool verified = false;
-            if (algorithm == "zlib") {
+            if (options.algorithm == "zlib") {
                 CompressResult decoded = zlib_decompress(output, source.size(), variant.window_bits);
                 verified = decoded.ok && decoded.data == source;
                 error = decoded.error;
-            } else if (algorithm == "heatshrink") {
+            } else if (options.algorithm == "heatshrink") {
                 CompressResult decoded = heatshrink_decompress(output, variant.heat_window, variant.heat_lookahead);
                 verified = decoded.ok && decoded.data == source;
                 error = decoded.error;
@@ -466,26 +574,29 @@ int main(int argc, char** argv) {
             }
 
             if (!verified) {
-                std::cerr << input.path.filename().string() << " " << algorithm << "." << variant.name
+                std::cerr << input.path.filename().string() << " " << options.algorithm << "." << variant.name
                           << ": verification failed: " << error << "\n";
-                had_error = true;
+                write_jsonl(jsonl, "failed", options.algorithm, variant.name, input, output_path,
+                    source.size(), output.size(), 0.0, avg_ms, options.runs, "verification failed: " + error);
                 continue;
             }
 
             try {
-                write_file(output_path_for(input, algorithm, variant.name), output);
+                write_file(output_path, output);
             } catch (const std::exception& ex) {
                 std::cerr << input.path.filename().string() << ": " << ex.what() << "\n";
-                had_error = true;
+                write_jsonl(jsonl, "failed", options.algorithm, variant.name, input, output_path,
+                    source.size(), output.size(), 0.0, avg_ms, options.runs, ex.what());
                 continue;
             }
 
             const double ratio = source.empty() ? 0.0 : (static_cast<double>(output.size()) / static_cast<double>(source.size())) * 100.0;
-            const double avg_ms = elapsed.count() / static_cast<double>(kTimingRuns);
             ratio_sum += ratio;
             ++success_count;
+            write_jsonl(jsonl, "ok", options.algorithm, variant.name, input, output_path,
+                source.size(), output.size(), ratio / 100.0, avg_ms, options.runs, "");
 
-            std::cout << algorithm << ' '
+            std::cout << options.algorithm << ' '
                       << variant.name << ' '
                       << input.path.filename().string() << ' '
                       << input.width << 'x' << input.height << ' '
@@ -501,5 +612,5 @@ int main(int argc, char** argv) {
                   << (ratio_sum / static_cast<double>(success_count)) << "%\n";
     }
 
-    return had_error ? 1 : 0;
+    return 0;
 }

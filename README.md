@@ -133,6 +133,30 @@ The bitstream converter processes PNG files only and skips any path below an
 `originals` folder. It emits `.bs-od` files for zlib/heatshrink and
 `.bs-1bppstreams` files for G5.
 
+## Full Benchmark Workflow
+
+Run the full benchmark in two phases.
+
+Phase 1 is preparation: build/update the tools and make sure `.bs-*` files exist
+beside the PNGs. Do not start the full compression pass until the bitstream
+corpus is ready.
+
+Phase 2 is the actual run. Create a timestamped folder under `results/`, run the
+compressor benchmark over folders containing `.bs-*` files, and write JSONL
+results:
+
+```bash
+mkdir -p results/run-YYYYMMDD-HHMMSS
+./codec_benchmark/build/compressor_benchmark --runs 1 --jsonl results/run-YYYYMMDD-HHMMSS/compression.jsonl zlib image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark --runs 1 --jsonl results/run-YYYYMMDD-HHMMSS/compression.jsonl heatshrink image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark --runs 1 --jsonl results/run-YYYYMMDD-HHMMSS/compression.jsonl g5 image_sources/photos/800x480
+python3 tools/summarize_results.py results/run-YYYYMMDD-HHMMSS/compression.jsonl
+```
+
+`--runs` defaults to `1`. The reported `avg_ms` is always the arithmetic mean of
+the requested runs; with one run it is the single measured runtime. G5 flip-limit
+failures are emitted as JSONL failure rows instead of aborting the whole run.
+
 ## Input Bitstreams
 
 The codec benchmark consumes bitstreams, not images directly.
@@ -178,9 +202,9 @@ This is a functionality check only. The generated 16x16 fixtures are too small t
 ## Manual Use
 
 ```bash
-./codec_benchmark/build/compressor_benchmark zlib <bitstream_folder>
-./codec_benchmark/build/compressor_benchmark heatshrink <bitstream_folder>
-./codec_benchmark/build/compressor_benchmark g5 <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] zlib <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] heatshrink <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] g5 <bitstream_folder>
 ```
 
 The selected algorithm runs all configured variants and writes `.dat` files beside the source bitstreams:
@@ -228,4 +252,4 @@ algorithm variant file resolution input_bytes compressed_bytes ratio avg_ms
 
 It then prints an average compressed/input ratio over successful outputs.
 
-Compression is timed over 7 runs. The benchmark writes one compressed output and verifies decompression against the exact codec input.
+Compression defaults to one run. The benchmark writes one compressed output and verifies decompression against the exact codec input.

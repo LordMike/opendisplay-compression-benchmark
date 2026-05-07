@@ -12,6 +12,8 @@ tools/**/bin/
 tools/**/obj/
 
 # Local editor/build noise
+__pycache__/
+*.py[cod]
 .vs/
 CMakeFiles/
 CMakeCache.txt
