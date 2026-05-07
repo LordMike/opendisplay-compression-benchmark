@@ -2,6 +2,11 @@ codec_benchmark/_deps/
 codec_benchmark/build/
 codec_benchmark/fixtures/*.dat
 
+# Generated benchmark bitstreams and compressed outputs
+image_sources/**/*.bs-od
+image_sources/**/*.bs-1bppstreams
+image_sources/**/*.dat
+
 # .NET generator build output
 tools/**/bin/
 tools/**/obj/

@@ -10,15 +10,14 @@ The current firmware/client flow uses zlib-compatible compressed payloads. The g
 codec_benchmark/      C++ benchmark CLI and codec integrations
 image_sources/        RGB source image corpus for benchmark conversion
 tools/                Deterministic image source generators
-bitstreams/           Suggested place for generated OpenDisplay bitstreams
 results/              Suggested place for copied benchmark outputs/summaries
 ```
 
-The source-image and bitstream folders are intentionally separate so different image libraries or conversion tools can be tested without changing the codec benchmark.
+Generated bitstreams are written beside their source PNGs under `image_sources/` so it is easy to compare the source image, packed payloads, and compressed outputs for the same asset.
 
 ## Image Sources
 
-The prepared source corpus lives in `image_sources/`. These are normal RGB PNG/JPEG source images; palette quantization, OpenDisplay packing, and 1bpp plane extraction are intentionally left for a later preprocessor step.
+The prepared source corpus lives in `image_sources/`. These are normal RGB PNG/JPEG source images; palette quantization, OpenDisplay packing, and 1bpp plane extraction are handled by the bitstream converter before compression benchmarking.
 
 The corpus currently contains `493` source files:
 
@@ -110,6 +109,30 @@ dotnet run --project tools/source-generator/SourceGenerator.csproj
 dotnet run --project tools/stress-generator/StressGenerator.csproj
 ```
 
+## Benchmark Pipeline
+
+Use the tools in this order:
+
+1. Gather or generate source images under `image_sources/`.
+2. Run one of the source generator tools when you need deterministic resized/stress PNG variations.
+3. Run the PNG bitstream converter:
+
+```bash
+python3 tools/bitstream-converter/convert_pngs.py image_sources
+```
+
+4. Run the codec benchmark on folders containing generated `.bs-*` files:
+
+```bash
+./codec_benchmark/build/compressor_benchmark zlib image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark heatshrink image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark g5 image_sources/photos/800x480
+```
+
+The bitstream converter processes PNG files only and skips any path below an
+`originals` folder. It emits `.bs-od` files for zlib/heatshrink and
+`.bs-1bppstreams` files for G5.
+
 ## Input Bitstreams
 
 The codec benchmark consumes bitstreams, not images directly.
@@ -117,8 +140,8 @@ The codec benchmark consumes bitstreams, not images directly.
 Use these filename forms:
 
 ```text
-<stem>.<width>x<height>.bs-od
-<stem>.<width>x<height>.bs-1bppstreams
+<stem>.<scheme>.<width>x<height>.bs-od
+<stem>.<scheme>.<width>x<height>.bs-1bppstreams
 ```
 
 `bs-od` is the current OpenDisplay packed pixel stream. It is used by zlib and heatshrink.
