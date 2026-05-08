@@ -1,5 +1,6 @@
 #include "g5_codec.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -47,11 +48,35 @@ static const char* g5_error_name(int rc) {
     }
 }
 
+static bool line_exceeds_flip_limit(const uint8_t* row, int width, size_t pitch) {
+    int flips = 0;
+    int previous = 0;
+    for (int x = 0; x < width; ++x) {
+        const uint8_t byte = row[static_cast<size_t>(x) / 8u];
+        const int bit = (byte >> (7 - (x & 7))) & 1;
+        if (bit != previous) {
+            ++flips;
+            previous = bit;
+            if (flips >= G5_FLIPS - 4) return true;
+        }
+    }
+    (void)pitch;
+    return false;
+}
+
 static G5Result compress_rows(const uint8_t* rows, int width, int row_count, size_t pitch) {
     G5Result result;
     if (width <= 0 || row_count <= 0 || pitch == 0) {
         result.error = "invalid geometry";
         return result;
+    }
+
+    for (int row = 0; row < row_count; ++row) {
+        if (line_exceeds_flip_limit(rows + static_cast<size_t>(row) * pitch, width, pitch)) {
+            result.error = "row " + std::to_string(row) + " exceeds MAX_IMAGE_FLIPS="
+                + std::to_string(G5_FLIPS);
+            return result;
+        }
     }
 
     const size_t source_size = pitch * static_cast<size_t>(row_count);
@@ -66,8 +91,11 @@ static G5Result compress_rows(const uint8_t* rows, int width, int row_count, siz
         return result;
     }
 
+    std::vector<uint8_t> row_buffer(pitch + 1u, 0);
     for (int row = 0; row < row_count; ++row) {
-        rc = g5_encode_encodeLine(&enc, const_cast<uint8_t*>(rows + static_cast<size_t>(row) * pitch));
+        std::memcpy(row_buffer.data(), rows + static_cast<size_t>(row) * pitch, pitch);
+        row_buffer[pitch] = 0;
+        rc = g5_encode_encodeLine(&enc, row_buffer.data());
         const bool last = row == row_count - 1;
         if ((!last && rc != G5_SUCCESS) || (last && rc != G5_ENCODE_COMPLETE)) {
             result.error = "g5_encode_encodeLine failed at row " + std::to_string(row)
@@ -98,14 +126,17 @@ static G5Result decompress_rows(const uint8_t* compressed, size_t compressed_siz
         return result;
     }
 
+    std::vector<uint8_t> row_buffer(pitch + 1u, 0);
     for (int row = 0; row < row_count; ++row) {
-        rc = g5_decode_line(&dec, out.data() + static_cast<size_t>(row) * pitch);
+        std::fill(row_buffer.begin(), row_buffer.end(), 0);
+        rc = g5_decode_line(&dec, row_buffer.data());
         const bool last = row == row_count - 1;
         if (rc != G5_SUCCESS && !(last && rc == G5_DECODE_COMPLETE)) {
             result.error = "g5_decode_line failed at row " + std::to_string(row)
                 + ": " + g5_error_name(rc);
             return result;
         }
+        std::memcpy(out.data() + static_cast<size_t>(row) * pitch, row_buffer.data(), pitch);
     }
 
     result.ok = true;

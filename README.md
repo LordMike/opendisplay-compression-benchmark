@@ -141,16 +141,21 @@ Phase 1 is preparation: build/update the tools and make sure `.bs-*` files exist
 beside the PNGs. Do not start the full compression pass until the bitstream
 corpus is ready.
 
-Phase 2 is the actual run. Create a timestamped folder under `results/`, run the
-compressor benchmark over folders containing `.bs-*` files, and write JSONL
-results:
+Phase 2 is the actual run. Create or reuse a folder under `results/`, run the
+benchmark runner over folders containing `.bs-*` files, and write JSONL results:
 
 ```bash
 mkdir -p results/run-YYYYMMDD-HHMMSS
-./codec_benchmark/build/compressor_benchmark --runs 1 --jsonl results/run-YYYYMMDD-HHMMSS/compression.jsonl zlib image_sources/photos/800x480
-./codec_benchmark/build/compressor_benchmark --runs 1 --jsonl results/run-YYYYMMDD-HHMMSS/compression.jsonl heatshrink image_sources/photos/800x480
-./codec_benchmark/build/compressor_benchmark --runs 1 --jsonl results/run-YYYYMMDD-HHMMSS/compression.jsonl g5 image_sources/photos/800x480
-python3 tools/summarize_results.py results/run-YYYYMMDD-HHMMSS/compression.jsonl
+python3 tools/run_benchmark.py --results-dir results/run-YYYYMMDD-HHMMSS --runs 1
+```
+
+`tools/run_benchmark.py` appends to existing result files by default and refreshes
+`summary.csv` from the accumulated `compression.jsonl`. Use `--replace` only when
+you intentionally want to clear a result directory before running. To add results
+for a new algorithm later, add it to `compressor_benchmark` and run:
+
+```bash
+python3 tools/run_benchmark.py --results-dir results/run-YYYYMMDD-HHMMSS --runs 1 --algorithm newalg
 ```
 
 `--runs` defaults to `1`. The reported `avg_ms` is always the arithmetic mean of
