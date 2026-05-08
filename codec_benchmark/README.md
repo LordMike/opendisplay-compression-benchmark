@@ -17,6 +17,7 @@ Manual use:
 ```bash
 ./codec_benchmark/build/compressor_benchmark zlib <source_folder>
 ./codec_benchmark/build/compressor_benchmark heatshrink <source_folder>
+./codec_benchmark/build/compressor_benchmark heatshrinkraw <source_folder>
 ./codec_benchmark/build/compressor_benchmark g5 <source_folder>
 ./codec_benchmark/build/compressor_benchmark brotli <source_folder>
 ./codec_benchmark/build/compressor_benchmark zstd <source_folder>
@@ -32,5 +33,5 @@ Inputs use resolution-bearing bitstream names:
 <stem>.<width>x<height>.bs-1bppstreams
 ```
 
-`zlib`, `heatshrink`, `brotli`, `zstd`, `lz4`, `lz4hc`, and `lzssraw` consume `.bs-od`.
+`zlib`, `heatshrink`, `heatshrinkraw`, `brotli`, `zstd`, `lz4`, `lz4hc`, and `lzssraw` consume `.bs-od`.
 `g5` consumes `.bs-1bppstreams`.

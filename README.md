@@ -126,6 +126,7 @@ python3 tools/bitstream-converter/convert_pngs.py image_sources
 ```bash
 ./codec_benchmark/build/compressor_benchmark zlib image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark heatshrink image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark heatshrinkraw image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark g5 image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark brotli image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark zstd image_sources/photos/800x480
@@ -135,7 +136,7 @@ python3 tools/bitstream-converter/convert_pngs.py image_sources
 ```
 
 The bitstream converter processes PNG files only and skips any path below an
-`originals` folder. It emits `.bs-od` files for zlib/heatshrink/Brotli/Zstd/LZ4/LZSS-Raw
+`originals` folder. It emits `.bs-od` files for zlib/heatshrink/heatshrinkraw/Brotli/Zstd/LZ4/LZSS-Raw
 and `.bs-1bppstreams` files for G5.
 
 ## Full Benchmark Workflow
@@ -182,7 +183,7 @@ Use these filename forms:
 ```
 
 `bs-od` is the current OpenDisplay packed pixel stream. It is used by zlib,
-heatshrink, Brotli, Zstd, LZ4, LZ4HC, and LZSS-Raw.
+heatshrink, heatshrinkraw, Brotli, Zstd, LZ4, LZ4HC, and LZSS-Raw.
 
 `bs-1bppstreams` is one or more strict 1bpp planes concatenated together. It is used by G5. The benchmark infers plane count from file size:
 
@@ -221,6 +222,7 @@ This is a functionality check only. The generated 16x16 fixtures are too small t
 ```bash
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] zlib <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] heatshrink <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] heatshrinkraw <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] g5 <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] brotli <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] zstd <bitstream_folder>
@@ -258,6 +260,18 @@ heatshrink.w9-l4
 heatshrink.w11-l5
 heatshrink.w13-l6
 ```
+
+heatshrinkraw:
+
+```text
+heatshrinkraw.w9-l4
+heatshrinkraw.w11-l5
+heatshrinkraw.w13-l6
+```
+
+heatshrinkraw preserves heatshrink-style tags and backrefs, but reserves the
+otherwise-useless 1-byte backref code as a raw-run escape. Long literal spans
+can then be batched instead of paying one tag bit per byte.
 
 Brotli:
 

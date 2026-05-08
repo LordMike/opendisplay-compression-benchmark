@@ -749,6 +749,293 @@ static CompressResult lzssraw_decompress(
     return result;
 }
 
+class HsRawBitWriter {
+public:
+    void push_bits(uint8_t count, uint32_t bits) {
+        if (count == 8 && bit_index_ == 0x80u) {
+            out_.push_back(static_cast<uint8_t>(bits));
+            return;
+        }
+        for (int bit = static_cast<int>(count) - 1; bit >= 0; --bit) {
+            if ((bits & (1u << bit)) != 0) current_byte_ |= bit_index_;
+            bit_index_ >>= 1u;
+            if (bit_index_ == 0) {
+                out_.push_back(current_byte_);
+                current_byte_ = 0;
+                bit_index_ = 0x80u;
+            }
+        }
+    }
+
+    std::vector<uint8_t> finish() {
+        if (bit_index_ != 0x80u) out_.push_back(current_byte_);
+        return std::move(out_);
+    }
+
+private:
+    std::vector<uint8_t> out_;
+    uint8_t current_byte_ = 0;
+    uint8_t bit_index_ = 0x80u;
+};
+
+class HsRawBitReader {
+public:
+    explicit HsRawBitReader(const std::vector<uint8_t>& input) : input_(input) {}
+
+    bool read_bits(uint8_t count, uint32_t& bits) {
+        bits = 0;
+        for (uint8_t i = 0; i < count; ++i) {
+            if (bit_index_ == 0) {
+                if (offset_ >= input_.size()) return false;
+                current_byte_ = input_[offset_++];
+                bit_index_ = 0x80u;
+            }
+            bits <<= 1u;
+            if ((current_byte_ & bit_index_) != 0) bits |= 1u;
+            bit_index_ >>= 1u;
+        }
+        return true;
+    }
+
+private:
+    const std::vector<uint8_t>& input_;
+    size_t offset_ = 0;
+    uint8_t current_byte_ = 0;
+    uint8_t bit_index_ = 0;
+};
+
+static bool heatshrinkraw_valid_params(int window_bits, int lookahead_bits) {
+    return window_bits >= 4
+        && window_bits <= 15
+        && lookahead_bits >= 3
+        && lookahead_bits < window_bits;
+}
+
+static size_t heatshrinkraw_min_match(int window_bits, int lookahead_bits) {
+    return (1u + static_cast<size_t>(window_bits) + static_cast<size_t>(lookahead_bits)) / 8u + 1u;
+}
+
+static void heatshrinkraw_emit_literal(HsRawBitWriter& writer, uint8_t byte) {
+    writer.push_bits(1, 1);
+    writer.push_bits(8, byte);
+}
+
+static void heatshrinkraw_emit_raw_escape(
+    HsRawBitWriter& writer,
+    const std::vector<uint8_t>& input,
+    size_t raw_start,
+    size_t raw_length,
+    int window_bits,
+    int lookahead_bits) {
+
+    const size_t max_raw = static_cast<size_t>(1) << window_bits;
+    size_t offset = 0;
+    while (offset < raw_length) {
+        const size_t chunk = std::min(max_raw, raw_length - offset);
+        writer.push_bits(1, 0);
+        writer.push_bits(static_cast<uint8_t>(window_bits), static_cast<uint32_t>(chunk - 1u));
+        writer.push_bits(static_cast<uint8_t>(lookahead_bits), 0);
+        for (size_t i = 0; i < chunk; ++i) {
+            writer.push_bits(8, input[raw_start + offset + i]);
+        }
+        offset += chunk;
+    }
+}
+
+static void heatshrinkraw_flush_raw(
+    HsRawBitWriter& writer,
+    const std::vector<uint8_t>& input,
+    size_t raw_start,
+    size_t raw_length,
+    int window_bits,
+    int lookahead_bits) {
+
+    const size_t raw_escape_overhead_bits = 1u + static_cast<size_t>(window_bits) + static_cast<size_t>(lookahead_bits);
+    if (raw_length <= raw_escape_overhead_bits) {
+        for (size_t i = 0; i < raw_length; ++i) {
+            heatshrinkraw_emit_literal(writer, input[raw_start + i]);
+        }
+        return;
+    }
+
+    heatshrinkraw_emit_raw_escape(writer, input, raw_start, raw_length, window_bits, lookahead_bits);
+}
+
+static CompressResult heatshrinkraw_compress(
+    const std::vector<uint8_t>& input,
+    int window_bits,
+    int lookahead_bits) {
+
+    CompressResult result;
+    if (!heatshrinkraw_valid_params(window_bits, lookahead_bits)) {
+        result.error = "invalid heatshrinkraw parameters";
+        return result;
+    }
+
+    const size_t window_size = static_cast<size_t>(1) << window_bits;
+    const size_t max_match = static_cast<size_t>(1) << lookahead_bits;
+    const size_t min_match = heatshrinkraw_min_match(window_bits, lookahead_bits);
+    constexpr int max_candidates = 64;
+
+    HsRawBitWriter writer;
+    std::vector<int> head(4096, -1);
+    std::vector<int> previous(input.size(), -1);
+
+    size_t raw_start = 0;
+    size_t raw_length = 0;
+    size_t position = 0;
+
+    while (position < input.size()) {
+        size_t best_length = 0;
+        size_t best_offset = 0;
+
+        if (position + 2 < input.size()) {
+            int candidate = head[lzssraw_hash3(input, position)];
+            int candidate_count = 0;
+            while (candidate >= 0 && candidate_count < max_candidates) {
+                const size_t candidate_pos = static_cast<size_t>(candidate);
+                const size_t offset = position - candidate_pos;
+                if (offset == 0 || offset > window_size) break;
+
+                size_t length = 0;
+                const size_t length_limit = std::min(max_match, input.size() - position);
+                while (length < length_limit && input[candidate_pos + length] == input[position + length]) {
+                    ++length;
+                }
+                if (length > best_length) {
+                    best_length = length;
+                    best_offset = offset;
+                    if (best_length == length_limit) break;
+                }
+
+                candidate = previous[candidate_pos];
+                ++candidate_count;
+            }
+        }
+
+        if (best_length >= min_match) {
+            if (raw_length > 0) {
+                heatshrinkraw_flush_raw(writer, input, raw_start, raw_length, window_bits, lookahead_bits);
+                raw_length = 0;
+            }
+
+            writer.push_bits(1, 0);
+            writer.push_bits(static_cast<uint8_t>(window_bits), static_cast<uint32_t>(best_offset - 1u));
+            writer.push_bits(static_cast<uint8_t>(lookahead_bits), static_cast<uint32_t>(best_length - 1u));
+
+            for (size_t i = 0; i < best_length; ++i) {
+                lzssraw_insert_position(input, head, previous, position + i);
+            }
+            position += best_length;
+            raw_start = position;
+        } else {
+            if (raw_length == 0) raw_start = position;
+            ++raw_length;
+            lzssraw_insert_position(input, head, previous, position);
+            ++position;
+            if (raw_length == window_size) {
+                heatshrinkraw_flush_raw(writer, input, raw_start, raw_length, window_bits, lookahead_bits);
+                raw_length = 0;
+                raw_start = position;
+            }
+        }
+    }
+
+    if (raw_length > 0) {
+        heatshrinkraw_flush_raw(writer, input, raw_start, raw_length, window_bits, lookahead_bits);
+    }
+
+    result.ok = true;
+    result.data = writer.finish();
+    return result;
+}
+
+static CompressResult heatshrinkraw_decompress(
+    const std::vector<uint8_t>& input,
+    size_t expected_size,
+    int window_bits,
+    int lookahead_bits) {
+
+    CompressResult result;
+    if (!heatshrinkraw_valid_params(window_bits, lookahead_bits)) {
+        result.error = "invalid heatshrinkraw parameters";
+        return result;
+    }
+
+    const size_t window_size = static_cast<size_t>(1) << window_bits;
+    std::vector<uint8_t> window(window_size, 0);
+    size_t window_pos = 0;
+    std::vector<uint8_t> out;
+    out.reserve(expected_size);
+    HsRawBitReader reader(input);
+
+    auto append_byte = [&](uint8_t byte) {
+        out.push_back(byte);
+        window[window_pos] = byte;
+        window_pos = (window_pos + 1u) & (window_size - 1u);
+    };
+
+    while (out.size() < expected_size) {
+        uint32_t tag = 0;
+        if (!reader.read_bits(1, tag)) {
+            result.error = "truncated heatshrinkraw tag";
+            return result;
+        }
+
+        if (tag != 0) {
+            uint32_t byte = 0;
+            if (!reader.read_bits(8, byte)) {
+                result.error = "truncated heatshrinkraw literal";
+                return result;
+            }
+            append_byte(static_cast<uint8_t>(byte));
+            continue;
+        }
+
+        uint32_t offset_code = 0;
+        uint32_t length_code = 0;
+        if (!reader.read_bits(static_cast<uint8_t>(window_bits), offset_code)
+            || !reader.read_bits(static_cast<uint8_t>(lookahead_bits), length_code)) {
+            result.error = "truncated heatshrinkraw backref";
+            return result;
+        }
+
+        if (length_code == 0) {
+            const size_t raw_length = static_cast<size_t>(offset_code) + 1u;
+            if (out.size() + raw_length > expected_size) {
+                result.error = "invalid heatshrinkraw raw run";
+                return result;
+            }
+            for (size_t i = 0; i < raw_length; ++i) {
+                uint32_t byte = 0;
+                if (!reader.read_bits(8, byte)) {
+                    result.error = "truncated heatshrinkraw raw run";
+                    return result;
+                }
+                append_byte(static_cast<uint8_t>(byte));
+            }
+            continue;
+        }
+
+        const size_t match_offset = static_cast<size_t>(offset_code) + 1u;
+        const size_t match_length = static_cast<size_t>(length_code) + 1u;
+        if (match_offset > window_size || match_offset > out.size()
+            || out.size() + match_length > expected_size) {
+            result.error = "invalid heatshrinkraw backref";
+            return result;
+        }
+
+        for (size_t i = 0; i < match_length; ++i) {
+            const size_t source = (window_pos + window_size - match_offset) & (window_size - 1u);
+            append_byte(window[source]);
+        }
+    }
+
+    result.ok = true;
+    result.data = std::move(out);
+    return result;
+}
+
 static bool heatshrink_poll_encoder(heatshrink_encoder* encoder, std::vector<uint8_t>& out, std::string& error) {
     uint8_t buffer[4096];
     while (true) {
@@ -907,7 +1194,7 @@ static fs::path output_path_for(const InputFile& input, const std::string& algor
 static void print_usage(const char* argv0) {
     std::cerr << "usage: " << argv0
               << " [--runs N] [--jsonl path] [--variant name] "
-              << "(brotli|g5|heatshrink|lz4|lz4hc|lzssraw|zlib|zstd) <source_folder>\n";
+              << "(brotli|g5|heatshrink|heatshrinkraw|lz4|lz4hc|lzssraw|zlib|zstd) <source_folder>\n";
 }
 
 static bool parse_options(int argc, char** argv, Options& options) {
@@ -941,6 +1228,7 @@ static bool parse_options(int argc, char** argv, Options& options) {
     options.folder = positional[1];
     return options.algorithm == "zlib"
         || options.algorithm == "heatshrink"
+        || options.algorithm == "heatshrinkraw"
         || options.algorithm == "g5"
         || options.algorithm == "brotli"
         || options.algorithm == "lz4"
@@ -1026,6 +1314,13 @@ int main(int argc, char** argv) {
             {"l9-ws15", 9, 15, 0, 0},
         };
     } else if (options.algorithm == "heatshrink") {
+        suffix = ".bs-od";
+        variants = {
+            {"w9-l4", 0, 0, 9, 4},
+            {"w11-l5", 0, 0, 11, 5},
+            {"w13-l6", 0, 0, 13, 6},
+        };
+    } else if (options.algorithm == "heatshrinkraw") {
         suffix = ".bs-od";
         variants = {
             {"w9-l4", 0, 0, 9, 4},
@@ -1149,6 +1444,10 @@ int main(int argc, char** argv) {
                     compressed = heatshrink_compress(source, variant.heat_window, variant.heat_lookahead);
                     ok = compressed.ok;
                     error = compressed.error;
+                } else if (options.algorithm == "heatshrinkraw") {
+                    compressed = heatshrinkraw_compress(source, variant.heat_window, variant.heat_lookahead);
+                    ok = compressed.ok;
+                    error = compressed.error;
                 } else if (options.algorithm == "brotli") {
                     compressed = brotli_compress(source, variant.brotli_quality, variant.brotli_lgwin);
                     ok = compressed.ok;
@@ -1199,6 +1498,10 @@ int main(int argc, char** argv) {
                 error = decoded.error;
             } else if (options.algorithm == "heatshrink") {
                 CompressResult decoded = heatshrink_decompress(output, variant.heat_window, variant.heat_lookahead);
+                verified = decoded.ok && decoded.data == source;
+                error = decoded.error;
+            } else if (options.algorithm == "heatshrinkraw") {
+                CompressResult decoded = heatshrinkraw_decompress(output, source.size(), variant.heat_window, variant.heat_lookahead);
                 verified = decoded.ok && decoded.data == source;
                 error = decoded.error;
             } else if (options.algorithm == "brotli") {

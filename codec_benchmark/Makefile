@@ -90,6 +90,7 @@ fixtures: $(BUILD_DIR)/fixture_generator
 check: all fixtures
 	$(BUILD_DIR)/compressor_benchmark zlib fixtures
 	$(BUILD_DIR)/compressor_benchmark heatshrink fixtures
+	$(BUILD_DIR)/compressor_benchmark heatshrinkraw fixtures
 	$(BUILD_DIR)/compressor_benchmark g5 fixtures
 	$(BUILD_DIR)/compressor_benchmark brotli fixtures
 	$(BUILD_DIR)/compressor_benchmark zstd fixtures
