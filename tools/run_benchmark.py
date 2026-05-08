@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK = ROOT / "codec_benchmark" / "build" / "compressor_benchmark"
-DEFAULT_ALGORITHMS = ("zlib", "heatshrink", "g5", "brotli", "zstd")
+DEFAULT_ALGORITHMS = ("zlib", "heatshrink", "g5", "brotli", "zstd", "lz4", "lz4hc")
 RESULT_FILES = ("compression.jsonl", "summary.csv", "stdout.log", "stderr.log", "commands.tsv", "metadata.jsonl")
 
 

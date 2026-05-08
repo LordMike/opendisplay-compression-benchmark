@@ -5,6 +5,8 @@ extern "C" {
 #include "brotli/encode.h"
 #include "heatshrink_decoder.h"
 #include "heatshrink_encoder.h"
+#include "lz4.h"
+#include "lz4hc.h"
 }
 #define ZSTD_STATIC_LINKING_ONLY
 #include "zstd.h"
@@ -12,6 +14,7 @@ extern "C" {
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -40,6 +43,8 @@ struct Variant {
     int brotli_lgwin = 0;
     int zstd_level = 0;
     int zstd_window_log = 0;
+    int lz4_block_size = 0;
+    int lz4_hc_level = 0;
 };
 
 struct CompressResult {
@@ -109,6 +114,15 @@ static void write_file(const fs::path& path, const std::vector<uint8_t>& data) {
     if (!data.empty()) {
         out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
     }
+}
+
+static void append_u16le(std::vector<uint8_t>& out, size_t value) {
+    out.push_back(static_cast<uint8_t>(value & 0xffu));
+    out.push_back(static_cast<uint8_t>((value >> 8u) & 0xffu));
+}
+
+static uint16_t read_u16le(const std::vector<uint8_t>& input, size_t offset) {
+    return static_cast<uint16_t>(input[offset] | (static_cast<uint16_t>(input[offset + 1]) << 8u));
 }
 
 static bool parse_resolution_input(const fs::path& path, const std::string& suffix, InputFile& input) {
@@ -339,6 +353,122 @@ static CompressResult zstd_decompress(const std::vector<uint8_t>& input, size_t 
     return result;
 }
 
+static CompressResult lz4_compress_blocks(const std::vector<uint8_t>& input, int block_size, int hc_level) {
+    CompressResult result;
+    if (block_size <= 0 || block_size > 32768) {
+        result.error = "invalid LZ4 block size";
+        return result;
+    }
+
+    std::vector<uint8_t> out;
+    out.reserve(input.size());
+    out.push_back('O');
+    out.push_back('D');
+    out.push_back('L');
+    out.push_back('4');
+    append_u16le(out, static_cast<size_t>(block_size));
+
+    size_t offset = 0;
+    while (offset < input.size()) {
+        const size_t remaining = input.size() - offset;
+        const int chunk_size = static_cast<int>(std::min(remaining, static_cast<size_t>(block_size)));
+        const int bound = LZ4_compressBound(chunk_size);
+        if (bound <= 0 || bound > 65535) {
+            result.error = "LZ4_compressBound failed";
+            return result;
+        }
+
+        std::vector<char> compressed(static_cast<size_t>(bound));
+        const char* src = reinterpret_cast<const char*>(input.data() + offset);
+        const int compressed_size = hc_level > 0
+            ? LZ4_compress_HC(src, compressed.data(), chunk_size, bound, hc_level)
+            : LZ4_compress_default(src, compressed.data(), chunk_size, bound);
+        if (compressed_size <= 0) {
+            result.error = "LZ4 compression failed";
+            return result;
+        }
+
+        append_u16le(out, static_cast<size_t>(chunk_size));
+        if (compressed_size >= chunk_size) {
+            append_u16le(out, 0);
+            out.insert(out.end(), input.begin() + static_cast<std::ptrdiff_t>(offset),
+                input.begin() + static_cast<std::ptrdiff_t>(offset + static_cast<size_t>(chunk_size)));
+        } else {
+            append_u16le(out, static_cast<size_t>(compressed_size));
+            out.insert(out.end(), compressed.begin(), compressed.begin() + compressed_size);
+        }
+        offset += static_cast<size_t>(chunk_size);
+    }
+
+    result.ok = true;
+    result.data = std::move(out);
+    return result;
+}
+
+static CompressResult lz4_decompress_blocks(const std::vector<uint8_t>& input, size_t expected_size, int block_size) {
+    CompressResult result;
+    if (input.size() < 6 || input[0] != 'O' || input[1] != 'D' || input[2] != 'L' || input[3] != '4') {
+        result.error = "invalid LZ4 block stream header";
+        return result;
+    }
+
+    const uint16_t stored_block_size = read_u16le(input, 4);
+    if (stored_block_size != static_cast<uint16_t>(block_size)) {
+        result.error = "LZ4 block size mismatch";
+        return result;
+    }
+
+    std::vector<uint8_t> out;
+    out.reserve(expected_size);
+    size_t offset = 6;
+    while (offset < input.size()) {
+        if (input.size() - offset < 4) {
+            result.error = "truncated LZ4 block header";
+            return result;
+        }
+        const uint16_t uncompressed_size = read_u16le(input, offset);
+        const uint16_t compressed_size = read_u16le(input, offset + 2);
+        offset += 4;
+        if (uncompressed_size == 0 || uncompressed_size > stored_block_size) {
+            result.error = "invalid LZ4 uncompressed block size";
+            return result;
+        }
+        const size_t payload_size = compressed_size == 0 ? uncompressed_size : compressed_size;
+        if (input.size() - offset < payload_size) {
+            result.error = "truncated LZ4 block payload";
+            return result;
+        }
+
+        const size_t output_offset = out.size();
+        out.resize(output_offset + uncompressed_size);
+        if (compressed_size == 0) {
+            std::copy(input.begin() + static_cast<std::ptrdiff_t>(offset),
+                input.begin() + static_cast<std::ptrdiff_t>(offset + payload_size),
+                out.begin() + static_cast<std::ptrdiff_t>(output_offset));
+        } else {
+            const int decoded = LZ4_decompress_safe(
+                reinterpret_cast<const char*>(input.data() + offset),
+                reinterpret_cast<char*>(out.data() + output_offset),
+                static_cast<int>(compressed_size),
+                static_cast<int>(uncompressed_size));
+            if (decoded != static_cast<int>(uncompressed_size)) {
+                result.error = "LZ4 decompression failed";
+                return result;
+            }
+        }
+        offset += payload_size;
+    }
+
+    if (out.size() != expected_size) {
+        result.error = "LZ4 decompressed size mismatch";
+        return result;
+    }
+
+    result.ok = true;
+    result.data = std::move(out);
+    return result;
+}
+
 static bool heatshrink_poll_encoder(heatshrink_encoder* encoder, std::vector<uint8_t>& out, std::string& error) {
     uint8_t buffer[4096];
     while (true) {
@@ -497,7 +627,7 @@ static fs::path output_path_for(const InputFile& input, const std::string& algor
 static void print_usage(const char* argv0) {
     std::cerr << "usage: " << argv0
               << " [--runs N] [--jsonl path] [--variant name] "
-              << "(brotli|g5|heatshrink|zlib|zstd) <source_folder>\n";
+              << "(brotli|g5|heatshrink|lz4|lz4hc|zlib|zstd) <source_folder>\n";
 }
 
 static bool parse_options(int argc, char** argv, Options& options) {
@@ -533,6 +663,8 @@ static bool parse_options(int argc, char** argv, Options& options) {
         || options.algorithm == "heatshrink"
         || options.algorithm == "g5"
         || options.algorithm == "brotli"
+        || options.algorithm == "lz4"
+        || options.algorithm == "lz4hc"
         || options.algorithm == "zstd";
 }
 
@@ -633,6 +765,22 @@ int main(int argc, char** argv) {
             {"l19-w12", 0, 0, 0, 0, 0, 0, 19, 12},
             {"l19-w15", 0, 0, 0, 0, 0, 0, 19, 15},
         };
+    } else if (options.algorithm == "lz4") {
+        suffix = ".bs-od";
+        variants = {
+            {"b512", 0, 0, 0, 0, 0, 0, 0, 0, 512, 0},
+            {"b1024", 0, 0, 0, 0, 0, 0, 0, 0, 1024, 0},
+            {"b16384", 0, 0, 0, 0, 0, 0, 0, 0, 16384, 0},
+            {"b32768", 0, 0, 0, 0, 0, 0, 0, 0, 32768, 0},
+        };
+    } else if (options.algorithm == "lz4hc") {
+        suffix = ".bs-od";
+        variants = {
+            {"b512-l9", 0, 0, 0, 0, 0, 0, 0, 0, 512, 9},
+            {"b1024-l9", 0, 0, 0, 0, 0, 0, 0, 0, 1024, 9},
+            {"b16384-l9", 0, 0, 0, 0, 0, 0, 0, 0, 16384, 9},
+            {"b32768-l9", 0, 0, 0, 0, 0, 0, 0, 0, 32768, 9},
+        };
     } else {
         suffix = ".bs-1bppstreams";
         variants = {
@@ -718,6 +866,10 @@ int main(int argc, char** argv) {
                     compressed = zstd_compress(source, variant.zstd_level, variant.zstd_window_log);
                     ok = compressed.ok;
                     error = compressed.error;
+                } else if (options.algorithm == "lz4" || options.algorithm == "lz4hc") {
+                    compressed = lz4_compress_blocks(source, variant.lz4_block_size, variant.lz4_hc_level);
+                    ok = compressed.ok;
+                    error = compressed.error;
                 } else {
                     g5_compressed = g5_compress_variant(variant.name, source, input.width, input.height, plane_count);
                     ok = g5_compressed.ok;
@@ -757,6 +909,10 @@ int main(int argc, char** argv) {
                 error = decoded.error;
             } else if (options.algorithm == "zstd") {
                 CompressResult decoded = zstd_decompress(output, source.size(), variant.zstd_window_log);
+                verified = decoded.ok && decoded.data == source;
+                error = decoded.error;
+            } else if (options.algorithm == "lz4" || options.algorithm == "lz4hc") {
+                CompressResult decoded = lz4_decompress_blocks(output, source.size(), variant.lz4_block_size);
                 verified = decoded.ok && decoded.data == source;
                 error = decoded.error;
             } else {

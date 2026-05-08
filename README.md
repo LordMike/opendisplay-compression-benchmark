@@ -129,11 +129,13 @@ python3 tools/bitstream-converter/convert_pngs.py image_sources
 ./codec_benchmark/build/compressor_benchmark g5 image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark brotli image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark zstd image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark lz4 image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark lz4hc image_sources/photos/800x480
 ```
 
 The bitstream converter processes PNG files only and skips any path below an
-`originals` folder. It emits `.bs-od` files for zlib/heatshrink/Brotli/Zstd and
-`.bs-1bppstreams` files for G5.
+`originals` folder. It emits `.bs-od` files for zlib/heatshrink/Brotli/Zstd/LZ4
+and `.bs-1bppstreams` files for G5.
 
 ## Full Benchmark Workflow
 
@@ -179,7 +181,7 @@ Use these filename forms:
 ```
 
 `bs-od` is the current OpenDisplay packed pixel stream. It is used by zlib,
-heatshrink, Brotli, and Zstd.
+heatshrink, Brotli, Zstd, LZ4, and LZ4HC.
 
 `bs-1bppstreams` is one or more strict 1bpp planes concatenated together. It is used by G5. The benchmark infers plane count from file size:
 
@@ -196,9 +198,9 @@ Supported G5 plane counts are `1`, `2`, and `4`.
 make -C codec_benchmark
 ```
 
-The Makefile fetches heatshrink, G5, Brotli, and Zstd headers into
+The Makefile fetches heatshrink, G5, Brotli, Zstd, and LZ4 sources into
 `codec_benchmark/_deps/`. zlib, Brotli, and Zstd libraries are expected from the
-system package. If Brotli/Zstd runtime libraries live outside
+system package; LZ4 is compiled into the benchmark from source. If Brotli/Zstd runtime libraries live outside
 `/usr/lib/x86_64-linux-gnu`, pass `LIBDIR=/path/to/libs` to `make`.
 
 There is also a CMake project in `codec_benchmark/`, but this environment only verified the Makefile path.
@@ -221,6 +223,8 @@ This is a functionality check only. The generated 16x16 fixtures are too small t
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] g5 <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] brotli <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] zstd <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] lz4 <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] lz4hc <bitstream_folder>
 ```
 
 The selected algorithm runs all configured variants and writes `.dat` files beside the source bitstreams:
@@ -268,6 +272,30 @@ zstd.l19-w10       level 19, 1 KB decoder window
 zstd.l19-w12       level 19, 4 KB decoder window
 zstd.l19-w15       level 19, 32 KB decoder window
 ```
+
+LZ4:
+
+```text
+lz4.b512           independent 512 B blocks
+lz4.b1024          independent 1 KB blocks
+lz4.b16384         independent 16 KB blocks
+lz4.b32768         independent 32 KB blocks
+```
+
+LZ4HC:
+
+```text
+lz4hc.b512-l9      HC level 9, independent 512 B blocks
+lz4hc.b1024-l9     HC level 9, independent 1 KB blocks
+lz4hc.b16384-l9    HC level 9, independent 16 KB blocks
+lz4hc.b32768-l9    HC level 9, independent 32 KB blocks
+```
+
+LZ4 and LZ4HC use the same decoder. The benchmark wraps raw LZ4 blocks in a
+small OpenDisplay test container with a block-size header and per-block lengths.
+Blocks are independent, and incompressible blocks are stored raw, so decoder
+memory is bounded by the configured block size instead of a 64 KB streaming
+history.
 
 G5:
 
