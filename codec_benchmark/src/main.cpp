@@ -1,9 +1,13 @@
 #include "g5_codec.h"
 
 extern "C" {
+#include "brotli/decode.h"
+#include "brotli/encode.h"
 #include "heatshrink_decoder.h"
 #include "heatshrink_encoder.h"
 }
+#define ZSTD_STATIC_LINKING_ONLY
+#include "zstd.h"
 #include "zlib.h"
 
 #include <algorithm>
@@ -32,6 +36,10 @@ struct Variant {
     int window_bits = 0;
     int heat_window = 0;
     int heat_lookahead = 0;
+    int brotli_quality = 0;
+    int brotli_lgwin = 0;
+    int zstd_level = 0;
+    int zstd_window_log = 0;
 };
 
 struct CompressResult {
@@ -207,6 +215,130 @@ static CompressResult zlib_decompress(const std::vector<uint8_t>& input, size_t 
     return result;
 }
 
+static CompressResult brotli_compress(const std::vector<uint8_t>& input, int quality, int lgwin) {
+    CompressResult result;
+    const size_t bound = BrotliEncoderMaxCompressedSize(input.size());
+    if (bound == 0 && !input.empty()) {
+        result.error = "BrotliEncoderMaxCompressedSize failed";
+        return result;
+    }
+
+    std::vector<uint8_t> out(bound);
+    size_t encoded_size = out.size();
+    const BROTLI_BOOL ok = BrotliEncoderCompress(
+        quality,
+        lgwin,
+        BROTLI_MODE_GENERIC,
+        input.size(),
+        input.data(),
+        &encoded_size,
+        out.data());
+    if (ok != BROTLI_TRUE) {
+        result.error = "BrotliEncoderCompress failed";
+        return result;
+    }
+
+    out.resize(encoded_size);
+    result.ok = true;
+    result.data = std::move(out);
+    return result;
+}
+
+static CompressResult brotli_decompress(const std::vector<uint8_t>& input, size_t expected_size) {
+    CompressResult result;
+    std::vector<uint8_t> out(expected_size);
+    size_t decoded_size = out.size();
+    const BrotliDecoderResult rc = BrotliDecoderDecompress(
+        input.size(),
+        input.data(),
+        &decoded_size,
+        out.data());
+    if (rc != BROTLI_DECODER_RESULT_SUCCESS || decoded_size != expected_size) {
+        result.error = "BrotliDecoderDecompress failed: " + std::to_string(static_cast<int>(rc));
+        return result;
+    }
+
+    result.ok = true;
+    result.data = std::move(out);
+    return result;
+}
+
+static CompressResult zstd_compress(const std::vector<uint8_t>& input, int level, int window_log) {
+    CompressResult result;
+    ZSTD_CCtx* context = ZSTD_createCCtx();
+    if (context == nullptr) {
+        result.error = "ZSTD_createCCtx failed";
+        return result;
+    }
+
+    auto cleanup = [&]() {
+        ZSTD_freeCCtx(context);
+    };
+
+    size_t rc = ZSTD_CCtx_setParameter(context, ZSTD_c_compressionLevel, level);
+    if (ZSTD_isError(rc)) {
+        result.error = "ZSTD_c_compressionLevel failed: " + std::string(ZSTD_getErrorName(rc));
+        cleanup();
+        return result;
+    }
+
+    rc = ZSTD_CCtx_setParameter(context, ZSTD_c_windowLog, window_log);
+    if (ZSTD_isError(rc)) {
+        result.error = "ZSTD_c_windowLog failed: " + std::string(ZSTD_getErrorName(rc));
+        cleanup();
+        return result;
+    }
+
+    std::vector<uint8_t> out(ZSTD_compressBound(input.size()));
+    rc = ZSTD_compress2(context, out.data(), out.size(), input.data(), input.size());
+    if (ZSTD_isError(rc)) {
+        result.error = "ZSTD_compress2 failed: " + std::string(ZSTD_getErrorName(rc));
+        cleanup();
+        return result;
+    }
+
+    out.resize(rc);
+    cleanup();
+    result.ok = true;
+    result.data = std::move(out);
+    return result;
+}
+
+static CompressResult zstd_decompress(const std::vector<uint8_t>& input, size_t expected_size, int window_log) {
+    CompressResult result;
+    ZSTD_DCtx* context = ZSTD_createDCtx();
+    if (context == nullptr) {
+        result.error = "ZSTD_createDCtx failed";
+        return result;
+    }
+
+    auto cleanup = [&]() {
+        ZSTD_freeDCtx(context);
+    };
+
+    const size_t max_window_size = static_cast<size_t>(1) << window_log;
+    size_t rc = ZSTD_DCtx_setMaxWindowSize(context, max_window_size);
+    if (ZSTD_isError(rc)) {
+        result.error = "ZSTD_DCtx_setMaxWindowSize failed: " + std::string(ZSTD_getErrorName(rc));
+        cleanup();
+        return result;
+    }
+
+    std::vector<uint8_t> out(expected_size);
+    rc = ZSTD_decompressDCtx(context, out.data(), out.size(), input.data(), input.size());
+    if (ZSTD_isError(rc) || rc != expected_size) {
+        result.error = "ZSTD_decompressDCtx failed: "
+            + std::string(ZSTD_isError(rc) ? ZSTD_getErrorName(rc) : "unexpected size");
+        cleanup();
+        return result;
+    }
+
+    cleanup();
+    result.ok = true;
+    result.data = std::move(out);
+    return result;
+}
+
 static bool heatshrink_poll_encoder(heatshrink_encoder* encoder, std::vector<uint8_t>& out, std::string& error) {
     uint8_t buffer[4096];
     while (true) {
@@ -364,7 +496,8 @@ static fs::path output_path_for(const InputFile& input, const std::string& algor
 
 static void print_usage(const char* argv0) {
     std::cerr << "usage: " << argv0
-              << " [--runs N] [--jsonl path] [--variant name] (g5|zlib|heatshrink) <source_folder>\n";
+              << " [--runs N] [--jsonl path] [--variant name] "
+              << "(brotli|g5|heatshrink|zlib|zstd) <source_folder>\n";
 }
 
 static bool parse_options(int argc, char** argv, Options& options) {
@@ -396,7 +529,11 @@ static bool parse_options(int argc, char** argv, Options& options) {
     if (positional.size() != 2) return false;
     options.algorithm = positional[0];
     options.folder = positional[1];
-    return options.algorithm == "zlib" || options.algorithm == "heatshrink" || options.algorithm == "g5";
+    return options.algorithm == "zlib"
+        || options.algorithm == "heatshrink"
+        || options.algorithm == "g5"
+        || options.algorithm == "brotli"
+        || options.algorithm == "zstd";
 }
 
 static void write_jsonl(
@@ -482,6 +619,20 @@ int main(int argc, char** argv) {
             {"w11-l5", 0, 0, 11, 5},
             {"w13-l6", 0, 0, 13, 6},
         };
+    } else if (options.algorithm == "brotli") {
+        suffix = ".bs-od";
+        variants = {
+            {"q9-w10", 0, 0, 0, 0, 9, 10},
+            {"q9-w12", 0, 0, 0, 0, 9, 12},
+            {"q9-w15", 0, 0, 0, 0, 9, 15},
+        };
+    } else if (options.algorithm == "zstd") {
+        suffix = ".bs-od";
+        variants = {
+            {"l19-w10", 0, 0, 0, 0, 0, 0, 19, 10},
+            {"l19-w12", 0, 0, 0, 0, 0, 0, 19, 12},
+            {"l19-w15", 0, 0, 0, 0, 0, 0, 19, 15},
+        };
     } else {
         suffix = ".bs-1bppstreams";
         variants = {
@@ -559,6 +710,14 @@ int main(int argc, char** argv) {
                     compressed = heatshrink_compress(source, variant.heat_window, variant.heat_lookahead);
                     ok = compressed.ok;
                     error = compressed.error;
+                } else if (options.algorithm == "brotli") {
+                    compressed = brotli_compress(source, variant.brotli_quality, variant.brotli_lgwin);
+                    ok = compressed.ok;
+                    error = compressed.error;
+                } else if (options.algorithm == "zstd") {
+                    compressed = zstd_compress(source, variant.zstd_level, variant.zstd_window_log);
+                    ok = compressed.ok;
+                    error = compressed.error;
                 } else {
                     g5_compressed = g5_compress_variant(variant.name, source, input.width, input.height, plane_count);
                     ok = g5_compressed.ok;
@@ -590,6 +749,14 @@ int main(int argc, char** argv) {
                 error = decoded.error;
             } else if (options.algorithm == "heatshrink") {
                 CompressResult decoded = heatshrink_decompress(output, variant.heat_window, variant.heat_lookahead);
+                verified = decoded.ok && decoded.data == source;
+                error = decoded.error;
+            } else if (options.algorithm == "brotli") {
+                CompressResult decoded = brotli_decompress(output, source.size());
+                verified = decoded.ok && decoded.data == source;
+                error = decoded.error;
+            } else if (options.algorithm == "zstd") {
+                CompressResult decoded = zstd_decompress(output, source.size(), variant.zstd_window_log);
                 verified = decoded.ok && decoded.data == source;
                 error = decoded.error;
             } else {

@@ -127,10 +127,12 @@ python3 tools/bitstream-converter/convert_pngs.py image_sources
 ./codec_benchmark/build/compressor_benchmark zlib image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark heatshrink image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark g5 image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark brotli image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark zstd image_sources/photos/800x480
 ```
 
 The bitstream converter processes PNG files only and skips any path below an
-`originals` folder. It emits `.bs-od` files for zlib/heatshrink and
+`originals` folder. It emits `.bs-od` files for zlib/heatshrink/Brotli/Zstd and
 `.bs-1bppstreams` files for G5.
 
 ## Full Benchmark Workflow
@@ -146,13 +148,16 @@ benchmark runner over folders containing `.bs-*` files, and write JSONL results:
 
 ```bash
 mkdir -p results/run-YYYYMMDD-HHMMSS
-python3 tools/run_benchmark.py --results-dir results/run-YYYYMMDD-HHMMSS --runs 1
+python3 tools/run_benchmark.py --results-dir results/run-YYYYMMDD-HHMMSS --runs 1 --jobs 1
 ```
 
 `tools/run_benchmark.py` appends to existing result files by default and refreshes
-`summary.csv` from the accumulated `compression.jsonl`. Use `--replace` only when
-you intentionally want to clear a result directory before running. To add results
-for a new algorithm later, add it to `compressor_benchmark` and run:
+`summary.csv` from the accumulated `compression.jsonl`. Use `--jobs N` to run
+multiple folder/algorithm commands in parallel. Each worker writes to private
+temporary files first; appends to `compression.jsonl`, logs, and `commands.tsv`
+are serialized by the runner. Use `--replace` only when you intentionally want
+to clear a result directory before running. To add results for a new algorithm
+later, add it to `compressor_benchmark` and run:
 
 ```bash
 python3 tools/run_benchmark.py --results-dir results/run-YYYYMMDD-HHMMSS --runs 1 --algorithm newalg
@@ -173,7 +178,8 @@ Use these filename forms:
 <stem>.<scheme>.<width>x<height>.bs-1bppstreams
 ```
 
-`bs-od` is the current OpenDisplay packed pixel stream. It is used by zlib and heatshrink.
+`bs-od` is the current OpenDisplay packed pixel stream. It is used by zlib,
+heatshrink, Brotli, and Zstd.
 
 `bs-1bppstreams` is one or more strict 1bpp planes concatenated together. It is used by G5. The benchmark infers plane count from file size:
 
@@ -190,7 +196,10 @@ Supported G5 plane counts are `1`, `2`, and `4`.
 make -C codec_benchmark
 ```
 
-The Makefile fetches heatshrink and G5 into `codec_benchmark/_deps/`. zlib is expected from the system development package.
+The Makefile fetches heatshrink, G5, Brotli, and Zstd headers into
+`codec_benchmark/_deps/`. zlib, Brotli, and Zstd libraries are expected from the
+system package. If Brotli/Zstd runtime libraries live outside
+`/usr/lib/x86_64-linux-gnu`, pass `LIBDIR=/path/to/libs` to `make`.
 
 There is also a CMake project in `codec_benchmark/`, but this environment only verified the Makefile path.
 
@@ -210,6 +219,8 @@ This is a functionality check only. The generated 16x16 fixtures are too small t
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] zlib <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] heatshrink <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] g5 <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] brotli <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] zstd <bitstream_folder>
 ```
 
 The selected algorithm runs all configured variants and writes `.dat` files beside the source bitstreams:
@@ -240,6 +251,22 @@ heatshrink:
 heatshrink.w9-l4
 heatshrink.w11-l5
 heatshrink.w13-l6
+```
+
+Brotli:
+
+```text
+brotli.q9-w10      quality 9, 1 KB decoder window
+brotli.q9-w12      quality 9, 4 KB decoder window
+brotli.q9-w15      quality 9, 32 KB decoder window
+```
+
+Zstd:
+
+```text
+zstd.l19-w10       level 19, 1 KB decoder window
+zstd.l19-w12       level 19, 4 KB decoder window
+zstd.l19-w15       level 19, 32 KB decoder window
 ```
 
 G5:

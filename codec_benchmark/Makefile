@@ -5,10 +5,15 @@ BUILD_DIR := build
 DEPS_DIR := _deps
 HEATSHRINK_DIR := $(DEPS_DIR)/heatshrink
 G5_DIR := $(DEPS_DIR)/g5_imageconvert
+BROTLI_DIR := $(DEPS_DIR)/brotli
+ZSTD_DIR := $(DEPS_DIR)/zstd
 
-CPPFLAGS += -I$(HEATSHRINK_DIR) -I$(G5_DIR)
+CPPFLAGS += -I$(HEATSHRINK_DIR) -I$(G5_DIR) -I$(BROTLI_DIR)/c/include -I$(ZSTD_DIR)/lib
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic
 CFLAGS ?= -O2 -Wall -Wextra
+LIBDIR ?= /usr/lib/x86_64-linux-gnu
+LDFLAGS += -L$(LIBDIR)
+LDLIBS += -lz -l:libbrotlienc.so.1 -l:libbrotlidec.so.1 -l:libbrotlicommon.so.1 -l:libzstd.so.1
 HEATSHRINK_DEFS := -DHEATSHRINK_DYNAMIC_ALLOC=1 -DHEATSHRINK_USE_INDEX=1
 
 BENCH_OBJS := \
@@ -23,7 +28,7 @@ BENCH_OBJS := \
 
 all: deps $(BUILD_DIR)/compressor_benchmark $(BUILD_DIR)/fixture_generator
 
-deps: $(HEATSHRINK_DIR) $(G5_DIR)
+deps: $(HEATSHRINK_DIR) $(G5_DIR) $(BROTLI_DIR) $(ZSTD_DIR)
 
 $(HEATSHRINK_DIR):
 	git clone --depth 1 https://github.com/atomicobject/heatshrink.git $(HEATSHRINK_DIR)
@@ -31,11 +36,17 @@ $(HEATSHRINK_DIR):
 $(G5_DIR):
 	git clone --depth 1 https://github.com/bitbank2/g5_imageconvert.git $(G5_DIR)
 
+$(BROTLI_DIR):
+	git clone --depth 1 https://github.com/google/brotli.git $(BROTLI_DIR)
+
+$(ZSTD_DIR):
+	git clone --depth 1 https://github.com/facebook/zstd.git $(ZSTD_DIR)
+
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(BUILD_DIR)/compressor_benchmark: $(BENCH_OBJS)
-	$(CXX) $(CXXFLAGS) $^ -lz -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 $(BUILD_DIR)/fixture_generator: $(BUILD_DIR)/fixture_generator.o
 	$(CXX) $(CXXFLAGS) $^ -o $@
@@ -68,7 +79,8 @@ check: all fixtures
 	$(BUILD_DIR)/compressor_benchmark zlib fixtures
 	$(BUILD_DIR)/compressor_benchmark heatshrink fixtures
 	$(BUILD_DIR)/compressor_benchmark g5 fixtures
+	$(BUILD_DIR)/compressor_benchmark brotli fixtures
+	$(BUILD_DIR)/compressor_benchmark zstd fixtures
 
 clean:
 	rm -rf $(BUILD_DIR)
-
