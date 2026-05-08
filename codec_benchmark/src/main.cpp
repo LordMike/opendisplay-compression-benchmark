@@ -45,6 +45,9 @@ struct Variant {
     int zstd_window_log = 0;
     int lz4_block_size = 0;
     int lz4_hc_level = 0;
+    int lzss_offset_bits = 0;
+    int lzss_length_bits = 0;
+    int lzss_raw_bits = 0;
 };
 
 struct CompressResult {
@@ -123,6 +126,15 @@ static void append_u16le(std::vector<uint8_t>& out, size_t value) {
 
 static uint16_t read_u16le(const std::vector<uint8_t>& input, size_t offset) {
     return static_cast<uint16_t>(input[offset] | (static_cast<uint16_t>(input[offset + 1]) << 8u));
+}
+
+static void append_u16be(std::vector<uint8_t>& out, size_t value) {
+    out.push_back(static_cast<uint8_t>((value >> 8u) & 0xffu));
+    out.push_back(static_cast<uint8_t>(value & 0xffu));
+}
+
+static uint16_t read_u16be(const std::vector<uint8_t>& input, size_t offset) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(input[offset]) << 8u) | input[offset + 1]);
 }
 
 static bool parse_resolution_input(const fs::path& path, const std::string& suffix, InputFile& input) {
@@ -469,6 +481,274 @@ static CompressResult lz4_decompress_blocks(const std::vector<uint8_t>& input, s
     return result;
 }
 
+static size_t lzssraw_hash3(const std::vector<uint8_t>& input, size_t offset) {
+    const uint32_t value = (static_cast<uint32_t>(input[offset]) << 16u)
+        ^ (static_cast<uint32_t>(input[offset + 1]) << 8u)
+        ^ static_cast<uint32_t>(input[offset + 2]);
+    return (value * 2654435761u) >> 20u;
+}
+
+static bool lzssraw_valid_params(int offset_bits, int length_bits, int raw_bits) {
+    return offset_bits >= 1
+        && offset_bits <= 15
+        && length_bits >= 1
+        && length_bits <= 15
+        && raw_bits == 7
+        && offset_bits + length_bits <= 15;
+}
+
+static uint8_t lzssraw_header0(bool raw_mode, int offset_bits) {
+    constexpr uint8_t version = 1;
+    return static_cast<uint8_t>((raw_mode ? 0x80u : 0u) | (version << 4u) | static_cast<uint8_t>(offset_bits));
+}
+
+static uint8_t lzssraw_header1(int length_bits, int raw_bits) {
+    return static_cast<uint8_t>((static_cast<uint8_t>(length_bits) << 4u) | static_cast<uint8_t>(raw_bits));
+}
+
+static void lzssraw_flush_raw(
+    std::vector<uint8_t>& out,
+    const std::vector<uint8_t>& input,
+    size_t raw_start,
+    size_t raw_length,
+    int raw_bits) {
+
+    const size_t max_raw = static_cast<size_t>(1) << raw_bits;
+    size_t offset = 0;
+    while (offset < raw_length) {
+        const size_t chunk = std::min(max_raw, raw_length - offset);
+        out.push_back(static_cast<uint8_t>(chunk - 1u));
+        out.insert(out.end(),
+            input.begin() + static_cast<std::ptrdiff_t>(raw_start + offset),
+            input.begin() + static_cast<std::ptrdiff_t>(raw_start + offset + chunk));
+        offset += chunk;
+    }
+}
+
+static void lzssraw_insert_position(
+    const std::vector<uint8_t>& input,
+    std::vector<int>& head,
+    std::vector<int>& previous,
+    size_t position) {
+
+    if (position + 2 >= input.size()) return;
+    const size_t hash = lzssraw_hash3(input, position);
+    previous[position] = head[hash];
+    head[hash] = static_cast<int>(position);
+}
+
+static CompressResult lzssraw_compress(
+    const std::vector<uint8_t>& input,
+    int offset_bits,
+    int length_bits,
+    int raw_bits) {
+
+    CompressResult result;
+    if (!lzssraw_valid_params(offset_bits, length_bits, raw_bits)) {
+        result.error = "invalid LZSS-Raw parameters";
+        return result;
+    }
+
+    const size_t window_size = static_cast<size_t>(1) << offset_bits;
+    const size_t max_match = (static_cast<size_t>(1) << length_bits) + 2u;
+    const size_t max_raw = static_cast<size_t>(1) << raw_bits;
+    constexpr size_t min_match = 3;
+    constexpr int max_candidates = 64;
+
+    std::vector<uint8_t> encoded;
+    encoded.reserve(input.size());
+    encoded.push_back(lzssraw_header0(false, offset_bits));
+    encoded.push_back(lzssraw_header1(length_bits, raw_bits));
+
+    std::vector<int> head(4096, -1);
+    std::vector<int> previous(input.size(), -1);
+
+    size_t raw_start = 0;
+    size_t raw_length = 0;
+    size_t position = 0;
+
+    while (position < input.size()) {
+        size_t best_length = 0;
+        size_t best_offset = 0;
+
+        if (position + min_match <= input.size()) {
+            int candidate = head[lzssraw_hash3(input, position)];
+            int candidate_count = 0;
+            while (candidate >= 0 && candidate_count < max_candidates) {
+                const size_t candidate_pos = static_cast<size_t>(candidate);
+                const size_t offset = position - candidate_pos;
+                if (offset == 0 || offset > window_size) break;
+
+                size_t length = 0;
+                const size_t length_limit = std::min(max_match, input.size() - position);
+                while (length < length_limit && input[candidate_pos + length] == input[position + length]) {
+                    ++length;
+                }
+                if (length > best_length) {
+                    best_length = length;
+                    best_offset = offset;
+                    if (best_length == length_limit) break;
+                }
+
+                candidate = previous[candidate_pos];
+                ++candidate_count;
+            }
+        }
+
+        if (best_length >= min_match) {
+            if (raw_length > 0) {
+                lzssraw_flush_raw(encoded, input, raw_start, raw_length, raw_bits);
+                raw_length = 0;
+            }
+
+            const int padding_bits = 15 - offset_bits - length_bits;
+            const uint16_t offset_code = static_cast<uint16_t>(best_offset - 1u);
+            const uint16_t length_code = static_cast<uint16_t>(best_length - min_match);
+            const uint16_t token = static_cast<uint16_t>(
+                0x8000u
+                | (offset_code << (length_bits + padding_bits))
+                | (length_code << padding_bits));
+            append_u16be(encoded, token);
+
+            for (size_t i = 0; i < best_length; ++i) {
+                lzssraw_insert_position(input, head, previous, position + i);
+            }
+            position += best_length;
+            raw_start = position;
+        } else {
+            if (raw_length == 0) raw_start = position;
+            ++raw_length;
+            lzssraw_insert_position(input, head, previous, position);
+            ++position;
+            if (raw_length == max_raw) {
+                lzssraw_flush_raw(encoded, input, raw_start, raw_length, raw_bits);
+                raw_length = 0;
+                raw_start = position;
+            }
+        }
+    }
+
+    if (raw_length > 0) {
+        lzssraw_flush_raw(encoded, input, raw_start, raw_length, raw_bits);
+    }
+
+    if (encoded.size() >= input.size() + 2u) {
+        std::vector<uint8_t> raw;
+        raw.reserve(input.size() + 2u);
+        raw.push_back(lzssraw_header0(true, offset_bits));
+        raw.push_back(lzssraw_header1(length_bits, raw_bits));
+        raw.insert(raw.end(), input.begin(), input.end());
+        result.data = std::move(raw);
+    } else {
+        result.data = std::move(encoded);
+    }
+
+    result.ok = true;
+    return result;
+}
+
+static CompressResult lzssraw_decompress(
+    const std::vector<uint8_t>& input,
+    size_t expected_size,
+    int expected_offset_bits,
+    int expected_length_bits,
+    int expected_raw_bits) {
+
+    CompressResult result;
+    if (input.size() < 2) {
+        result.error = "truncated LZSS-Raw header";
+        return result;
+    }
+
+    const bool raw_mode = (input[0] & 0x80u) != 0;
+    const int version = (input[0] >> 4u) & 0x07u;
+    const int offset_bits = input[0] & 0x0fu;
+    const int length_bits = (input[1] >> 4u) & 0x0fu;
+    const int raw_bits = input[1] & 0x0fu;
+    if (version != 1 || offset_bits != expected_offset_bits
+        || length_bits != expected_length_bits || raw_bits != expected_raw_bits
+        || !lzssraw_valid_params(offset_bits, length_bits, raw_bits)) {
+        result.error = "invalid LZSS-Raw header";
+        return result;
+    }
+
+    if (raw_mode) {
+        if (input.size() - 2u != expected_size) {
+            result.error = "LZSS-Raw raw payload size mismatch";
+            return result;
+        }
+        result.data.assign(input.begin() + 2, input.end());
+        result.ok = true;
+        return result;
+    }
+
+    const size_t window_size = static_cast<size_t>(1) << offset_bits;
+    const int padding_bits = 15 - offset_bits - length_bits;
+    std::vector<uint8_t> window(window_size, 0);
+    size_t window_pos = 0;
+    std::vector<uint8_t> out;
+    out.reserve(expected_size);
+
+    auto append_byte = [&](uint8_t byte) {
+        out.push_back(byte);
+        window[window_pos] = byte;
+        window_pos = (window_pos + 1u) & (window_size - 1u);
+    };
+
+    size_t offset = 2;
+    while (offset < input.size()) {
+        const uint8_t first = input[offset];
+        if ((first & 0x80u) == 0) {
+            const size_t raw_length = static_cast<size_t>(first) + 1u;
+            ++offset;
+            if (input.size() - offset < raw_length || out.size() + raw_length > expected_size) {
+                result.error = "invalid LZSS-Raw raw run";
+                return result;
+            }
+            for (size_t i = 0; i < raw_length; ++i) {
+                append_byte(input[offset + i]);
+            }
+            offset += raw_length;
+            continue;
+        }
+
+        if (input.size() - offset < 2) {
+            result.error = "truncated LZSS-Raw match token";
+            return result;
+        }
+        const uint16_t token = read_u16be(input, offset);
+        offset += 2;
+        const uint16_t payload = token & 0x7fffu;
+        if (padding_bits > 0 && (payload & ((1u << padding_bits) - 1u)) != 0) {
+            result.error = "non-zero LZSS-Raw match padding";
+            return result;
+        }
+
+        const size_t length_code = (payload >> padding_bits) & ((1u << length_bits) - 1u);
+        const size_t match_offset = (payload >> (length_bits + padding_bits)) + 1u;
+        const size_t match_length = length_code + 3u;
+        if (match_offset == 0 || match_offset > window_size || match_offset > out.size()
+            || out.size() + match_length > expected_size) {
+            result.error = "invalid LZSS-Raw match";
+            return result;
+        }
+
+        for (size_t i = 0; i < match_length; ++i) {
+            const size_t source = (window_pos + window_size - match_offset) & (window_size - 1u);
+            append_byte(window[source]);
+        }
+    }
+
+    if (out.size() != expected_size) {
+        result.error = "LZSS-Raw decompressed size mismatch";
+        return result;
+    }
+
+    result.ok = true;
+    result.data = std::move(out);
+    return result;
+}
+
 static bool heatshrink_poll_encoder(heatshrink_encoder* encoder, std::vector<uint8_t>& out, std::string& error) {
     uint8_t buffer[4096];
     while (true) {
@@ -627,7 +907,7 @@ static fs::path output_path_for(const InputFile& input, const std::string& algor
 static void print_usage(const char* argv0) {
     std::cerr << "usage: " << argv0
               << " [--runs N] [--jsonl path] [--variant name] "
-              << "(brotli|g5|heatshrink|lz4|lz4hc|zlib|zstd) <source_folder>\n";
+              << "(brotli|g5|heatshrink|lz4|lz4hc|lzssraw|zlib|zstd) <source_folder>\n";
 }
 
 static bool parse_options(int argc, char** argv, Options& options) {
@@ -665,6 +945,7 @@ static bool parse_options(int argc, char** argv, Options& options) {
         || options.algorithm == "brotli"
         || options.algorithm == "lz4"
         || options.algorithm == "lz4hc"
+        || options.algorithm == "lzssraw"
         || options.algorithm == "zstd";
 }
 
@@ -781,6 +1062,16 @@ int main(int argc, char** argv) {
             {"b16384-l9", 0, 0, 0, 0, 0, 0, 0, 0, 16384, 9},
             {"b32768-l9", 0, 0, 0, 0, 0, 0, 0, 0, 32768, 9},
         };
+    } else if (options.algorithm == "lzssraw") {
+        suffix = ".bs-od";
+        variants = {
+            {"w6-l4-r7", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 4, 7},
+            {"w7-l4-r7", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 4, 7},
+            {"w8-l4-r7", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 4, 7},
+            {"w9-l4-r7", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 4, 7},
+            {"w10-l5-r7", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 5, 7},
+            {"w11-l4-r7", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11, 4, 7},
+        };
     } else {
         suffix = ".bs-1bppstreams";
         variants = {
@@ -870,6 +1161,13 @@ int main(int argc, char** argv) {
                     compressed = lz4_compress_blocks(source, variant.lz4_block_size, variant.lz4_hc_level);
                     ok = compressed.ok;
                     error = compressed.error;
+                } else if (options.algorithm == "lzssraw") {
+                    compressed = lzssraw_compress(source,
+                        variant.lzss_offset_bits,
+                        variant.lzss_length_bits,
+                        variant.lzss_raw_bits);
+                    ok = compressed.ok;
+                    error = compressed.error;
                 } else {
                     g5_compressed = g5_compress_variant(variant.name, source, input.width, input.height, plane_count);
                     ok = g5_compressed.ok;
@@ -913,6 +1211,14 @@ int main(int argc, char** argv) {
                 error = decoded.error;
             } else if (options.algorithm == "lz4" || options.algorithm == "lz4hc") {
                 CompressResult decoded = lz4_decompress_blocks(output, source.size(), variant.lz4_block_size);
+                verified = decoded.ok && decoded.data == source;
+                error = decoded.error;
+            } else if (options.algorithm == "lzssraw") {
+                CompressResult decoded = lzssraw_decompress(output,
+                    source.size(),
+                    variant.lzss_offset_bits,
+                    variant.lzss_length_bits,
+                    variant.lzss_raw_bits);
                 verified = decoded.ok && decoded.data == source;
                 error = decoded.error;
             } else {

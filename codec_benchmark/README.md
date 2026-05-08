@@ -22,6 +22,7 @@ Manual use:
 ./codec_benchmark/build/compressor_benchmark zstd <source_folder>
 ./codec_benchmark/build/compressor_benchmark lz4 <source_folder>
 ./codec_benchmark/build/compressor_benchmark lz4hc <source_folder>
+./codec_benchmark/build/compressor_benchmark lzssraw <source_folder>
 ```
 
 Inputs use resolution-bearing bitstream names:
@@ -31,5 +32,5 @@ Inputs use resolution-bearing bitstream names:
 <stem>.<width>x<height>.bs-1bppstreams
 ```
 
-`zlib`, `heatshrink`, `brotli`, `zstd`, `lz4`, and `lz4hc` consume `.bs-od`.
+`zlib`, `heatshrink`, `brotli`, `zstd`, `lz4`, `lz4hc`, and `lzssraw` consume `.bs-od`.
 `g5` consumes `.bs-1bppstreams`.

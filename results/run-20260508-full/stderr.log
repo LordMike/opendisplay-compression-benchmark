@@ -2667,3 +2667,93 @@ smooth-gradient-dither-trap.mono.960x640.bs-1bppstreams g5.perplane-f256: compre
 ===== [20260508-182702 48/90] lz4hc image_sources/photos/2560x1440 =====
 
 ===== [20260508-182702 18/90] lz4hc image_sources/generated/2560x1440 =====
+
+===== [20260508-194835 3/45] lzssraw image_sources/generated/128x296 =====
+
+===== [20260508-194835 2/45] lzssraw image_sources/generated/122x250 =====
+
+===== [20260508-194835 5/45] lzssraw image_sources/generated/152x296 =====
+
+===== [20260508-194835 8/45] lzssraw image_sources/generated/200x200 =====
+
+===== [20260508-194835 10/45] lzssraw image_sources/generated/296x128 =====
+
+===== [20260508-194835 17/45] lzssraw image_sources/photos/122x250 =====
+
+===== [20260508-194835 11/45] lzssraw image_sources/generated/400x300 =====
+
+===== [20260508-194835 18/45] lzssraw image_sources/photos/128x296 =====
+
+===== [20260508-194835 20/45] lzssraw image_sources/photos/152x296 =====
+
+===== [20260508-194835 12/45] lzssraw image_sources/generated/600x448 =====
+
+===== [20260508-194835 16/45] lzssraw image_sources/photos/1024x576 =====
+
+===== [20260508-194835 13/45] lzssraw image_sources/generated/648x480 =====
+
+===== [20260508-194835 23/45] lzssraw image_sources/photos/200x200 =====
+
+===== [20260508-194835 4/45] lzssraw image_sources/generated/1360x480 =====
+
+===== [20260508-194835 19/45] lzssraw image_sources/photos/1360x480 =====
+
+===== [20260508-194835 25/45] lzssraw image_sources/photos/296x128 =====
+
+===== [20260508-194835 14/45] lzssraw image_sources/generated/800x480 =====
+
+===== [20260508-194835 26/45] lzssraw image_sources/photos/400x300 =====
+
+===== [20260508-194835 1/45] lzssraw image_sources/generated/1024x576 =====
+
+===== [20260508-194835 27/45] lzssraw image_sources/photos/600x448 =====
+
+===== [20260508-194835 28/45] lzssraw image_sources/photos/648x480 =====
+
+===== [20260508-194835 15/45] lzssraw image_sources/generated/960x640 =====
+
+===== [20260508-194835 32/45] lzssraw image_sources/stress/122x250 =====
+
+===== [20260508-194835 29/45] lzssraw image_sources/photos/800x480 =====
+
+===== [20260508-194835 33/45] lzssraw image_sources/stress/128x296 =====
+
+===== [20260508-194835 35/45] lzssraw image_sources/stress/152x296 =====
+
+===== [20260508-194835 38/45] lzssraw image_sources/stress/200x200 =====
+
+===== [20260508-194835 31/45] lzssraw image_sources/stress/1024x576 =====
+
+===== [20260508-194835 30/45] lzssraw image_sources/photos/960x640 =====
+
+===== [20260508-194835 40/45] lzssraw image_sources/stress/296x128 =====
+
+===== [20260508-194835 34/45] lzssraw image_sources/stress/1360x480 =====
+
+===== [20260508-194835 41/45] lzssraw image_sources/stress/400x300 =====
+
+===== [20260508-194835 42/45] lzssraw image_sources/stress/600x448 =====
+
+===== [20260508-194835 43/45] lzssraw image_sources/stress/648x480 =====
+
+===== [20260508-194835 44/45] lzssraw image_sources/stress/800x480 =====
+
+===== [20260508-194835 21/45] lzssraw image_sources/photos/1600x1200 =====
+
+===== [20260508-194835 45/45] lzssraw image_sources/stress/960x640 =====
+
+===== [20260508-194835 36/45] lzssraw image_sources/stress/1600x1200 =====
+
+===== [20260508-194835 22/45] lzssraw image_sources/photos/1872x1404 =====
+
+===== [20260508-194835 6/45] lzssraw image_sources/generated/1600x1200 =====
+
+===== [20260508-194835 37/45] lzssraw image_sources/stress/1872x1404 =====
+
+===== [20260508-194835 39/45] lzssraw image_sources/stress/2560x1440 =====
+
+===== [20260508-194835 24/45] lzssraw image_sources/photos/2560x1440 =====
+
+===== [20260508-194835 7/45] lzssraw image_sources/generated/1872x1404 =====
+
+===== [20260508-194835 9/45] lzssraw image_sources/generated/2560x1440 =====

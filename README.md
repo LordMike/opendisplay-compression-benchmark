@@ -131,10 +131,11 @@ python3 tools/bitstream-converter/convert_pngs.py image_sources
 ./codec_benchmark/build/compressor_benchmark zstd image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark lz4 image_sources/photos/800x480
 ./codec_benchmark/build/compressor_benchmark lz4hc image_sources/photos/800x480
+./codec_benchmark/build/compressor_benchmark lzssraw image_sources/photos/800x480
 ```
 
 The bitstream converter processes PNG files only and skips any path below an
-`originals` folder. It emits `.bs-od` files for zlib/heatshrink/Brotli/Zstd/LZ4
+`originals` folder. It emits `.bs-od` files for zlib/heatshrink/Brotli/Zstd/LZ4/LZSS-Raw
 and `.bs-1bppstreams` files for G5.
 
 ## Full Benchmark Workflow
@@ -181,7 +182,7 @@ Use these filename forms:
 ```
 
 `bs-od` is the current OpenDisplay packed pixel stream. It is used by zlib,
-heatshrink, Brotli, Zstd, LZ4, and LZ4HC.
+heatshrink, Brotli, Zstd, LZ4, LZ4HC, and LZSS-Raw.
 
 `bs-1bppstreams` is one or more strict 1bpp planes concatenated together. It is used by G5. The benchmark infers plane count from file size:
 
@@ -225,6 +226,7 @@ This is a functionality check only. The generated 16x16 fixtures are too small t
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] zstd <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] lz4 <bitstream_folder>
 ./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] lz4hc <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] lzssraw <bitstream_folder>
 ```
 
 The selected algorithm runs all configured variants and writes `.dat` files beside the source bitstreams:
@@ -296,6 +298,21 @@ small OpenDisplay test container with a block-size header and per-block lengths.
 Blocks are independent, and incompressible blocks are stored raw, so decoder
 memory is bounded by the configured block size instead of a 64 KB streaming
 history.
+
+LZSS-Raw:
+
+```text
+lzssraw.w6-l4-r7     64 B window, match length 3..18, raw run 1..128
+lzssraw.w7-l4-r7     128 B window, match length 3..18, raw run 1..128
+lzssraw.w8-l4-r7     256 B window, match length 3..18, raw run 1..128
+lzssraw.w9-l4-r7     512 B window, match length 3..18, raw run 1..128
+lzssraw.w10-l5-r7    1 KB window, match length 3..34, raw run 1..128
+lzssraw.w11-l4-r7    2 KB window, match length 3..18, raw run 1..128
+```
+
+LZSS-Raw uses a small two-byte stream header, byte-aligned raw-run tokens, and
+fixed two-byte match tokens. The benchmark stores an entire payload as raw when
+the token stream would not be smaller, so random data pays only the header cost.
 
 G5:
 

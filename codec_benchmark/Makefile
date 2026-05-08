@@ -95,6 +95,7 @@ check: all fixtures
 	$(BUILD_DIR)/compressor_benchmark zstd fixtures
 	$(BUILD_DIR)/compressor_benchmark lz4 fixtures
 	$(BUILD_DIR)/compressor_benchmark lz4hc fixtures
+	$(BUILD_DIR)/compressor_benchmark lzssraw fixtures
 
 clean:
 	rm -rf $(BUILD_DIR)
