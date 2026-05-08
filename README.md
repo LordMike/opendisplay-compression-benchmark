@@ -207,9 +207,9 @@ This is a functionality check only. The generated 16x16 fixtures are too small t
 ## Manual Use
 
 ```bash
-./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] zlib <bitstream_folder>
-./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] heatshrink <bitstream_folder>
-./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] g5 <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] zlib <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] heatshrink <bitstream_folder>
+./codec_benchmark/build/compressor_benchmark [--runs N] [--jsonl results/run/compression.jsonl] [--variant name] g5 <bitstream_folder>
 ```
 
 The selected algorithm runs all configured variants and writes `.dat` files beside the source bitstreams:
@@ -224,7 +224,12 @@ zlib:
 
 ```text
 zlib.current       level 6, windowBits 15; current Python zlib.compress behavior
+zlib.l1-ws9       level 1, 512 B decoder window
+zlib.l6-ws9       level 6, 512 B decoder window
 zlib.l9-ws9       level 9, 512 B decoder window
+zlib.l1-ws10      level 1, 1 KB decoder window
+zlib.l6-ws10      level 6, 1 KB decoder window
+zlib.l9-ws10      level 9, 1 KB decoder window
 zlib.l9-ws12      level 9, 4 KB decoder window
 zlib.l9-ws15      level 9, 32 KB decoder window
 ```

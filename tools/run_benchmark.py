@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
         help="bitstream folder to run; repeat for multiple. Defaults to all folders under image_sources.",
     )
     parser.add_argument(
+        "--variant",
+        dest="variants",
+        action="append",
+        help="variant to run; repeat for multiple. Passed through to compressor_benchmark.",
+    )
+    parser.add_argument(
         "--replace",
         action="store_true",
         help="delete existing result files in the result directory before running",
@@ -134,6 +140,7 @@ def main() -> int:
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "runs": args.runs,
         "algorithms": list(algorithms),
+        "variants": list(args.variants or []),
         "folders": [str(folder.relative_to(ROOT)) for folder in folders],
         "command_count": total,
         "replace": args.replace,
@@ -159,9 +166,10 @@ def main() -> int:
                     str(args.runs),
                     "--jsonl",
                     str(jsonl),
-                    algorithm,
-                    str(folder),
                 ]
+                for variant in args.variants or []:
+                    command.extend(["--variant", variant])
+                command.extend([algorithm, str(folder)])
 
                 print(f"[{index:03d}/{total:03d}] {algorithm} {rel_folder}", flush=True)
                 stdout_handle.write(f"\n===== [{run_id} {index}/{total}] {algorithm} {rel_folder} =====\n")

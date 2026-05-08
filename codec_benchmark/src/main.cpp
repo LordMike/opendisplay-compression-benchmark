@@ -46,6 +46,7 @@ struct Options {
     int runs = 1;
     fs::path jsonl_path;
     bool jsonl_enabled = false;
+    std::vector<std::string> variants;
 };
 
 static bool ends_with(const std::string& value, const std::string& suffix) {
@@ -362,7 +363,8 @@ static fs::path output_path_for(const InputFile& input, const std::string& algor
 }
 
 static void print_usage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [--runs N] [--jsonl path] (g5|zlib|heatshrink) <source_folder>\n";
+    std::cerr << "usage: " << argv0
+              << " [--runs N] [--jsonl path] [--variant name] (g5|zlib|heatshrink) <source_folder>\n";
 }
 
 static bool parse_options(int argc, char** argv, Options& options) {
@@ -381,6 +383,9 @@ static bool parse_options(int argc, char** argv, Options& options) {
             if (++i >= argc) return false;
             options.jsonl_path = argv[i];
             options.jsonl_enabled = true;
+        } else if (arg == "--variant") {
+            if (++i >= argc) return false;
+            options.variants.push_back(argv[i]);
         } else if (arg == "--help" || arg == "-h") {
             return false;
         } else {
@@ -461,7 +466,12 @@ int main(int argc, char** argv) {
         suffix = ".bs-od";
         variants = {
             {"current", 6, 15, 0, 0},
+            {"l1-ws9", 1, 9, 0, 0},
+            {"l6-ws9", 6, 9, 0, 0},
             {"l9-ws9", 9, 9, 0, 0},
+            {"l1-ws10", 1, 10, 0, 0},
+            {"l6-ws10", 6, 10, 0, 0},
+            {"l9-ws10", 9, 10, 0, 0},
             {"l9-ws12", 9, 12, 0, 0},
             {"l9-ws15", 9, 15, 0, 0},
         };
@@ -479,6 +489,21 @@ int main(int argc, char** argv) {
             {"perplane-f128", 0, 0, 0, 0},
             {"perplane-f256", 0, 0, 0, 0},
         };
+    }
+
+    if (!options.variants.empty()) {
+        std::vector<Variant> filtered;
+        for (const std::string& requested : options.variants) {
+            const auto found = std::find_if(variants.begin(), variants.end(), [&](const Variant& variant) {
+                return variant.name == requested;
+            });
+            if (found == variants.end()) {
+                std::cerr << "unknown " << options.algorithm << " variant: " << requested << "\n";
+                return 2;
+            }
+            filtered.push_back(*found);
+        }
+        variants = std::move(filtered);
     }
 
     const std::vector<InputFile> inputs = find_inputs(options.folder, suffix);
